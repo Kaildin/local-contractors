@@ -84,9 +84,80 @@ def sanitize_website(url: str) -> str:
     return u
 
 
-def scrape_with_selenium(search_urls, driver=None):
+def _scroll_results_panel(driver, scroll_times: int = 10):
+    """
+    Scrolla il pannello laterale dei risultati di Google Maps.
+    Google Maps usa un div scrollabile separato dalla pagina principale.
+    """
+    panel_selectors = [
+        "div[role='feed']",
+        "div.m6QErb[aria-label]",
+        "div.m6QErb.DxyBCb",
+        "div.m6QErb",
+        "div[jsaction*='scrollend']",
+    ]
+    panel = None
+    for sel in panel_selectors:
+        try:
+            els = driver.find_elements(By.CSS_SELECTOR, sel)
+            if els:
+                panel = els[0]
+                logger.debug(f"Pannello scroll trovato con: {sel}")
+                break
+        except:
+            continue
+
+    if panel:
+        for i in range(scroll_times):
+            try:
+                driver.execute_script("arguments[0].scrollTop += 800;", panel)
+                time.sleep(0.6)
+            except:
+                break
+    else:
+        # fallback: scrolla la pagina intera
+        logger.debug("Pannello laterale non trovato, uso scroll pagina")
+        for i in range(scroll_times):
+            driver.execute_script(f"window.scrollBy(0, {400 + i*100});")
+            time.sleep(0.5)
+
+
+def _extract_num_recensioni(driver) -> int:
+    """
+    Estrae il numero di recensioni dalla scheda aperta.
+    Google Maps mostra un button tipo: aria-label='1.234 recensioni'
+    """
+    try:
+        selectors = [
+            "button[aria-label*='recensioni']",
+            "button[aria-label*='reviews']",
+            "span[aria-label*='recensioni']",
+            "span[aria-label*='reviews']",
+        ]
+        for sel in selectors:
+            els = driver.find_elements(By.CSS_SELECTOR, sel)
+            for el in els:
+                label = el.get_attribute("aria-label") or ""
+                m = re.search(r"([\d\.\,]+)\s*(recensioni|reviews)", label, re.IGNORECASE)
+                if m:
+                    raw = m.group(1).replace(".", "").replace(",", "")
+                    return int(raw)
+        # fallback: testo visibile con pattern '(123)'
+        page_text = driver.find_element(By.TAG_NAME, "body").text
+        m = re.search(r"\((\d[\d\.\,]*)\)", page_text)
+        if m:
+            raw = m.group(1).replace(".", "").replace(",", "")
+            return int(raw)
+    except Exception as e:
+        logger.debug(f"Errore lettura recensioni: {e}")
+    return 0
+
+
+def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll_times: int = 10):
     """Scrape dei risultati utilizzando Selenium su Google Maps.
     search_urls: lista di dict con chiavi 'comune', 'keyword', 'url'
+    max_results: numero massimo di risultati per keyword (default 20)
+    scroll_times: quante volte scrollare il pannello (default 10)
     """
     results = []
 
@@ -158,10 +229,9 @@ def scrape_with_selenium(search_urls, driver=None):
 
             time.sleep(2)
 
+            # --- SCROLL PANNELLO LATERALE (fix: non la pagina intera) ---
             logger.info("Scrolling per caricare risultati...")
-            for i in range(7):
-                driver.execute_script(f"window.scrollBy(0, {300 + i*100});")
-                time.sleep(0.5)
+            _scroll_results_panel(driver, scroll_times=scroll_times)
 
             selectors_to_try = [
                 "div[role='article']",
@@ -191,9 +261,10 @@ def scrape_with_selenium(search_urls, driver=None):
                 logger.warning(f"Nessun risultato trovato per {keyword} {comune_attuale}")
                 continue
 
-            for i in range(min(10, len(result_elements))):
+            n_to_process = min(max_results, len(result_elements))
+            for i in range(n_to_process):
                 try:
-                    logger.info(f"Elaborazione risultato {i+1}/{min(10, len(result_elements))}")
+                    logger.info(f"Elaborazione risultato {i+1}/{n_to_process}")
 
                     result_elements = driver.find_elements(By.CSS_SELECTOR, used_selector)
                     if i >= len(result_elements): break
@@ -267,6 +338,12 @@ def scrape_with_selenium(search_urls, driver=None):
                         try: driver.get(current_list_page_url)
                         except: pass
                         continue
+
+                    # --- URL REALE della scheda Maps ---
+                    maps_url = driver.current_url
+
+                    # --- RECENSIONI dalla scheda aperta ---
+                    num_recensioni = _extract_num_recensioni(driver)
 
                     # Estrazione dettagli
                     address = ""
@@ -361,7 +438,8 @@ def scrape_with_selenium(search_urls, driver=None):
                         "indirizzo": address,
                         "telefono": phone,
                         "sito_web": website,
-                        "num_recensioni": "",
+                        "num_recensioni": num_recensioni,
+                        "maps_url": maps_url,
                     }
 
                     results.append(result)

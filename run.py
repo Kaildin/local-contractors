@@ -1,6 +1,5 @@
 import argparse
 import logging
-import pandas as pd
 from pathlib import Path
 
 from src.scraper import search_contractors
@@ -21,7 +20,8 @@ def main():
     parser.add_argument("--nicchie", nargs="+", required=True)
     parser.add_argument("--min-reviews", type=int, default=1)
     parser.add_argument("--max-reviews", type=int, default=15)
-    parser.add_argument("--scroll-times", type=int, default=5)
+    parser.add_argument("--scroll-times", type=int, default=10)
+    parser.add_argument("--max-results", type=int, default=20)
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--no-http-check", action="store_true")
     parser.add_argument("--output", default="output/debug_run.csv")
@@ -41,10 +41,15 @@ def main():
             + "\n".join(f"  - {n[0]}" for n in NICHES)
         )
 
+    out_path = args.output
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+
     print(f"\nComune: {args.comune}")
     print(f"Keywords: {keywords}")
     print(f"Recensioni: {args.min_reviews}-{args.max_reviews}")
-    print(f"Headless: {args.headless} | HTTP check: {not args.no_http_check} | Scroll: {args.scroll_times}\n")
+    print(f"Headless: {args.headless} | HTTP check: {not args.no_http_check} | Scroll: {args.scroll_times}")
+    print(f"Max risultati per keyword: {args.max_results}")
+    print(f"Output CSV: {out_path}\n")
 
     results = search_contractors(
         comune=args.comune,
@@ -54,6 +59,8 @@ def main():
         check_website_alive=not args.no_http_check,
         headless=args.headless,
         scroll_times=args.scroll_times,
+        max_results=args.max_results,
+        output_csv=out_path,
     )
 
     print(f"\n{'='*60}")
@@ -65,17 +72,12 @@ def main():
         print(f"    comune:      {r.get('comune', '')}")
         print(f"    keyword:     {r.get('keyword', '')}")
         print(f"    telefono:    {r.get('telefono', '')}")
-        orario = r.get('orario', '')
-        print(f"    orario:      {orario[:80]}..." if len(orario) > 80 else f"    orario:      {orario}")
         print(f"    recensioni:  {r.get('num_recensioni', '')}")
         print(f"    sito_google: {r.get('sito_google', '')}")
-        print(f"    maps:        {r.get('google_maps', '')}")
+        print(f"    maps:        {r.get('maps_url', '')}")
         print()
 
-    out = Path(args.output)
-    out.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(results).to_csv(out, index=False)
-    print(f"CSV salvato in: {out}")
+    print(f"CSV salvato in: {out_path} (salvataggio incrementale attivo)")
 
 
 if __name__ == "__main__":
