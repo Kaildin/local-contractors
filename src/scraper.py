@@ -2,10 +2,12 @@ import logging
 import requests
 import time
 import random
-import os
 from typing import List, Dict, Any
 
+from .website_checker import website_is_real
+
 logger = logging.getLogger(__name__)
+
 
 # ---------------------------------------------------------------
 # Geocoding: dato comune -> (lat, lon)
@@ -26,7 +28,7 @@ def geocode_comune(comune: str, api_key: str) -> tuple:
 
 
 # ---------------------------------------------------------------
-# Core scraper: cerca artigiani SENZA sito e con 1-15 recensioni
+# Core scraper Places API + filtro sito reale
 # ---------------------------------------------------------------
 def search_contractors(
     comune: str,
@@ -35,24 +37,34 @@ def search_contractors(
     min_reviews: int = 1,
     max_reviews: int = 15,
     radius_km: float = 5.0,
+    check_website_alive: bool = True,
 ) -> List[Dict[str, Any]]:
     """
-    Cerca attività artigianali su Google Places.
-    Filtra:
-      - NESSUN sito web associato
-      - Numero recensioni tra min_reviews e max_reviews
-    Ritorna lista di dict con: nome, telefono, orario, google_maps_link, comune, keyword, num_recensioni
+    Cerca attivita' artigianali su Google Places.
+
+    Filtra FUORI le attivita' che hanno un sito web REALE, cioe':
+      - Non e' un profilo social (Facebook, Instagram, ecc.)
+      - Non e' una directory (PagineGialle, TripAdvisor, ecc.)
+      - Il sito risponde online (check HTTP)
+
+    Tiene DENTRO le attivita' che:
+      - Non hanno sito web
+      - O hanno solo un link social/directory (= niente sito vero)
+      - O hanno un dominio morto/non raggiungibile
+
+    Ritorna lista di dict: nome, telefono, orario, google_maps,
+                           comune, keyword, num_recensioni
     """
     lat, lon = geocode_comune(comune, api_key)
     if lat is None:
         logger.warning(f"[Scraper] Impossibile geocodificare {comune}, salto.")
         return []
 
-    nearby_url   = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
-    details_url  = "https://maps.googleapis.com/maps/api/place/details/json"
-    radius_m     = int(radius_km * 1000)
-    results      = []
-    seen_ids     = set()
+    nearby_url  = "https://maps.googleapis.com/maps/api/place/nearbysearch/json"
+    details_url = "https://maps.googleapis.com/maps/api/place/details/json"
+    radius_m    = int(radius_km * 1000)
+    results     = []
+    seen_ids    = set()
 
     session = requests.Session()
     session.headers.update({"User-Agent": "LocalContractors/1.0"})
@@ -61,7 +73,7 @@ def search_contractors(
         logger.info(f"[Scraper] '{keyword}' in {comune}")
         page_token = None
 
-        for _page in range(3):  # max 3 pagine = 60 risultati per keyword
+        for _page in range(3):  # max 3 pagine x keyword = ~60 candidati
             params = {
                 "key":      api_key,
                 "location": f"{lat},{lon}",
@@ -70,7 +82,7 @@ def search_contractors(
             }
             if page_token:
                 params = {"key": api_key, "pagetoken": page_token}
-                time.sleep(2.0)  # obbligatorio per next_page_token
+                time.sleep(2.0)
 
             try:
                 resp = session.get(nearby_url, params=params, timeout=20)
@@ -80,14 +92,17 @@ def search_contractors(
                 break
 
             if data.get("status") not in {"OK", "ZERO_RESULTS"}:
-                logger.warning(f"[Scraper] Status: {data.get('status')} - {data.get('error_message','')}")
+                logger.warning(
+                    f"[Scraper] Status: {data.get('status')} - "
+                    f"{data.get('error_message','')}"
+                )
                 break
 
             for place in data.get("results", []):
-                place_id         = place.get("place_id")
-                user_ratings     = place.get("user_ratings_total", 0) or 0
+                place_id     = place.get("place_id")
+                user_ratings = place.get("user_ratings_total", 0) or 0
 
-                # Filtro recensioni
+                # --- Filtro n. recensioni ---
                 if not (min_reviews <= user_ratings <= max_reviews):
                     continue
 
@@ -95,7 +110,7 @@ def search_contractors(
                     continue
                 seen_ids.add(place_id)
 
-                # Fetch Details: website, phone, opening_hours
+                # --- Place Details ---
                 det_params = {
                     "key":      api_key,
                     "place_id": place_id,
@@ -111,32 +126,40 @@ def search_contractors(
                     det_resp = session.get(details_url, params=det_params, timeout=20)
                     det_data = det_resp.json()
                     if det_data.get("status") == "OK":
-                        res     = det_data.get("result", {})
-                        website = res.get("website", "") or ""
-                        phone   = res.get("formatted_phone_number", "") or ""
-                        maps_url = res.get("url", maps_url)  # link diretto alla pagina Google
-                        oh      = res.get("opening_hours", {})
+                        res      = det_data.get("result", {})
+                        website  = res.get("website", "") or ""
+                        phone    = res.get("formatted_phone_number", "") or ""
+                        maps_url = res.get("url", maps_url)
+                        oh       = res.get("opening_hours", {})
                         if oh:
-                            weekday_text = oh.get("weekday_text", [])
-                            hours = " | ".join(weekday_text) if weekday_text else ""
+                            wt    = oh.get("weekday_text", [])
+                            hours = " | ".join(wt) if wt else ""
                 except Exception as e:
                     logger.debug(f"[Scraper] Errore Details per {place_id}: {e}")
 
-                # Filtro: NESSUN sito web
-                if website:
+                # --- Filtro sito web reale ---
+                # website_is_real() ritorna True se il sito e' un vero sito attivo.
+                # Noi vogliamo il CONTRARIO: teniamo chi NON ha un sito reale.
+                if website_is_real(website, check_alive=check_website_alive):
+                    logger.info(
+                        f"[Scraper] Scartato '{place.get('name','')}' "
+                        f"- ha sito reale: {website}"
+                    )
                     continue
 
                 results.append({
-                    "nome":          place.get("name", ""),
-                    "comune":        comune,
-                    "keyword":       keyword,
-                    "telefono":      phone,
-                    "orario":        hours,
-                    "num_recensioni":user_ratings,
-                    "google_maps":   maps_url,
+                    "nome":           place.get("name", ""),
+                    "comune":         comune,
+                    "keyword":        keyword,
+                    "telefono":       phone,
+                    "orario":         hours,
+                    "num_recensioni": user_ratings,
+                    "google_maps":    maps_url,
+                    # Utile per debug: mostra cosa aveva su Google
+                    "sito_google":    website or "(nessuno)",
                 })
 
-                time.sleep(random.uniform(0.2, 0.5))  # piccolo throttle Details
+                time.sleep(random.uniform(0.2, 0.5))
 
             page_token = data.get("next_page_token")
             if not page_token:
