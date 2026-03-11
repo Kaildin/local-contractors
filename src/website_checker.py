@@ -26,12 +26,30 @@ SOCIAL_DOMAINS = {
     "beacons.ai",
 }
 
+# Piattaforme website-builder: hanno un sito ma NON e' un sito proprietario
+# -> trattate come "nessun sito" ai fini del filtro
+WEBSITE_BUILDER_DOMAINS = {
+    "wixsite.com",
+    "wix.com",
+    "squarespace.com",
+    "weebly.com",
+    "webnode.it",
+    "webnode.com",
+    "jimdo.com",
+    "strikingly.com",
+    "yolasite.com",
+    "godaddysites.com",
+    "wordpress.com",  # .com hosted (NON .org self-hosted)
+    "blogger.com",
+    "blogspot.com",
+    "altervista.org",
+}
+
 
 def _root_domain(url: str) -> str:
     """Estrae il dominio radice (es. 'facebook.com') da un URL."""
     try:
         host = urlparse(url).netloc.lower().lstrip("www.")
-        # Gestisce sottodomini: prende gli ultimi 2 segmenti
         parts = host.split(".")
         if len(parts) >= 2:
             return ".".join(parts[-2:])
@@ -48,19 +66,25 @@ def is_social_or_directory(url: str) -> bool:
     return domain in SOCIAL_DOMAINS
 
 
+def is_website_builder(url: str) -> bool:
+    """
+    True se il sito e' ospitato su una piattaforma website-builder (Wix, Squarespace ecc.).
+    Questi vengono trattati come "nessun sito proprietario".
+    """
+    if not url:
+        return False
+    domain = _root_domain(url)
+    return domain in WEBSITE_BUILDER_DOMAINS
+
+
 def is_website_alive(url: str, timeout: int = 8) -> bool:
     """
     Verifica con requests (HEAD poi GET) se il sito risponde con 2xx o 3xx.
-    NON usa Selenium qui: e' un check HTTP veloce.
-    Ritorna False se:
-      - timeout / errore connessione
-      - HTTP >= 400
-      - dominio non risolve
+    Ritorna False se timeout / errore connessione / HTTP >= 400.
     """
     if not url:
         return False
 
-    # Assicura schema
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
 
@@ -73,12 +97,10 @@ def is_website_alive(url: str, timeout: int = 8) -> bool:
     }
 
     try:
-        # Prima prova HEAD (veloce)
         r = requests.head(url, headers=headers, timeout=timeout,
                           allow_redirects=True, verify=False)
         if r.status_code < 400:
             return True
-        # Alcuni server non supportano HEAD, prova GET
         r = requests.get(url, headers=headers, timeout=timeout,
                          allow_redirects=True, verify=False, stream=True)
         return r.status_code < 400
@@ -89,14 +111,20 @@ def is_website_alive(url: str, timeout: int = 8) -> bool:
 
 def website_is_real(url: str, check_alive: bool = True) -> bool:
     """
-    Ritorna True SOLO se il sito:
-      1. non e' un social/directory
-      2. (opzionale) risponde online
+    Ritorna True SOLO se il sito e' un sito proprietario reale:
+      1. Non e' vuoto
+      2. Non e' un social/directory
+      3. Non e' un website-builder (Wix, Squarespace ecc.)
+      4. (opzionale) Risponde online
+    Se ritorna False -> il lead e' un candidato valido (nessun sito reale).
     """
     if not url:
         return False
     if is_social_or_directory(url):
         logger.info(f"[WebCheck] Scartato (social/directory): {url}")
+        return False
+    if is_website_builder(url):
+        logger.info(f"[WebCheck] Scartato (website-builder, trattato come nessun sito): {url}")
         return False
     if check_alive and not is_website_alive(url):
         logger.info(f"[WebCheck] Scartato (sito morto): {url}")
