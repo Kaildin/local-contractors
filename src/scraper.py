@@ -12,15 +12,11 @@ logger = logging.getLogger(__name__)
 
 CSV_FIELDNAMES = [
     "comune", "keyword", "nome", "indirizzo", "telefono",
-    "sito_web", "num_recensioni", "sito_google", "maps_url",
+    "sito_web", "ha_sito_web", "num_recensioni", "maps_url",
 ]
 
 
 def _load_already_scraped(output_csv: str) -> set:
-    """
-    Legge il CSV esistente e restituisce un set di chiavi (nome.lower, comune.lower)
-    già presenti, per saltarli durante la run (resume anti-crash).
-    """
     seen = set()
     path = Path(output_csv)
     if not path.exists():
@@ -40,10 +36,6 @@ def _load_already_scraped(output_csv: str) -> set:
 
 
 def _append_lead_to_csv(output_csv: str, row: Dict[str, Any]):
-    """
-    Appende una singola riga al CSV in modo incrementale.
-    Crea il file con header se non esiste ancora.
-    """
     path = Path(output_csv)
     path.parent.mkdir(parents=True, exist_ok=True)
     file_exists = path.exists() and path.stat().st_size > 0
@@ -58,7 +50,6 @@ def _append_lead_to_csv(output_csv: str, row: Dict[str, Any]):
 
 
 def build_search_urls(comuni: List[str], keywords: List[str]) -> List[Dict[str, str]]:
-    """Costruisce la lista di URL di ricerca Google Maps per ogni comune x keyword."""
     search_urls = []
     for comune in comuni:
         for keyword in keywords:
@@ -84,10 +75,10 @@ def search_contractors(
 ) -> List[Dict[str, Any]]:
     """
     Wrapper principale: costruisce gli URL, lancia scrape_with_selenium,
-    applica il filtro sito web reale e recensioni.
-    Salva ogni lead valido in modo incrementale sul CSV per resistere ai crash.
+    applica solo il filtro recensioni.
+    Salva ogni lead (con o senza sito) in modo incrementale.
+    La colonna ha_sito_web (True/False) permette di filtrare in post.
     """
-    # --- Resume anti-crash: carica lead già presenti nel CSV ---
     already_seen: set = set()
     if output_csv:
         already_seen = _load_already_scraped(output_csv)
@@ -119,7 +110,7 @@ def search_contractors(
             logger.info(f"[Resume] Già presente, saltato: {nome}")
             continue
 
-        # --- Filtro recensioni ---
+        # --- Filtro recensioni (unico filtro rimasto) ---
         n = r.get("num_recensioni") or 0
         try:
             n = int(n)
@@ -129,23 +120,19 @@ def search_contractors(
             logger.info(f"[Filter] Scartato '{nome}' - recensioni fuori range: {n}")
             continue
 
-        # --- Filtro sito web reale ---
-        website = r.get("sito_web", "") or ""
-        if website_is_real(website, check_alive=check_website_alive):
-            logger.info(f"[Filter] Scartato '{nome}' - sito reale: {website}")
-            continue
+        # --- Classifica sito web: ha_sito_web per filtrare in post ---
+        website = (r.get("sito_web") or "").strip()
+        ha_sito = website_is_real(website, check_alive=check_website_alive) if website else False
+        r["ha_sito_web"] = ha_sito
 
-        r["sito_google"] = website or "(nessuno)"
-        # maps_url è già il current_url reale salvato dallo scraper
         if not r.get("maps_url"):
-            r["maps_url"] = f"https://www.google.com/maps/search/{nome.replace(' ','+')}+{comune_r}?hl=it"
+            r["maps_url"] = f"https://www.google.com/maps/search/{nome.replace(' ', '+')}+{comune_r}?hl=it"
 
         filtered.append(r)
         already_seen.add(key)
 
-        # --- Salvataggio incrementale: scrivi subito sul CSV ---
         if output_csv:
             _append_lead_to_csv(output_csv, r)
-            logger.info(f"[Salvataggio] Lead salvato: {nome}")
+            logger.info(f"[Salvataggio] Lead salvato: {nome} (ha_sito_web={ha_sito})")
 
     return filtered
