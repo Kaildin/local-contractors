@@ -120,20 +120,16 @@ def _scroll_results_panel(driver, scroll_times: int = 10):
 def _extract_num_recensioni(driver) -> int:
     """
     Estrae il numero di recensioni dalla scheda aperta.
-
-    Strategia (in ordine di priorità):
-    1. span.ZkP5Je  aria-label tipo '4,6 stelle 253 recensioni'  (scheda aperta)
-    2. span.ZkP5Je  aria-label tipo '4,6 stelle 1 recensione'   (scheda aperta)
-    3. Qualsiasi [aria-label] che contiene 'recension' con numero
-    4. span.UY7F9   innerText tipo '(10)'                       (lista risultati)
-    5. Fallback body text regex \(\d+\)
+    Strategia (in ordine di priorita'):
+    1. span.ZkP5Je aria-label tipo '4,6 stelle 253 recensioni'
+    2. Qualsiasi [aria-label] con 'recension'
+    3. span.UY7F9 innerText tipo '(10)'
+    4. Fallback body text
     """
     try:
-        # --- Strategia 1+2: span.ZkP5Je con aria-label ---
         els = driver.find_elements(By.CSS_SELECTOR, "span.ZkP5Je")
         for el in els:
             label = el.get_attribute("aria-label") or ""
-            # Patterns: '4,6 stelle 253 recensioni' | '5,0 stelle 1 recensione'
             m = re.search(r"(\d[\d\.,]*)\s+recension", label, re.IGNORECASE)
             if m:
                 raw = m.group(1).replace(".", "").replace(",", "")
@@ -142,7 +138,6 @@ def _extract_num_recensioni(driver) -> int:
                 except ValueError:
                     continue
 
-        # --- Strategia 3: qualsiasi aria-label con 'recension' ---
         for sel in [
             "[aria-label*='recensioni']",
             "[aria-label*='recensione']",
@@ -160,7 +155,6 @@ def _extract_num_recensioni(driver) -> int:
                     except ValueError:
                         continue
 
-        # --- Strategia 4: span.UY7F9 innerText tipo '(10)' ---
         els = driver.find_elements(By.CSS_SELECTOR, "span.UY7F9")
         for el in els:
             txt = (el.text or "").strip()
@@ -172,7 +166,6 @@ def _extract_num_recensioni(driver) -> int:
                 except ValueError:
                     continue
 
-        # --- Strategia 5: fallback body text ---
         page_text = driver.find_element(By.TAG_NAME, "body").text
         m = re.search(r"\((\d[\d\.\,]*)\)", page_text)
         if m:
@@ -187,36 +180,70 @@ def _extract_num_recensioni(driver) -> int:
     return 0
 
 
-def _wait_for_place_panel(driver, timeout: int = 8):
-    try:
-        WebDriverWait(driver, timeout).until(
-            EC.any_of(
-                EC.presence_of_element_located((By.CSS_SELECTOR, "h1.DUwDvf")),
-                EC.presence_of_element_located((By.CSS_SELECTOR, "h1.fontHeadlineLarge")),
-                EC.presence_of_element_located((By.CSS_SELECTOR, "button[data-item-id='address']")),
-                EC.presence_of_element_located((By.CSS_SELECTOR, "button[data-item-id='phone:tel']")),
-                EC.presence_of_element_located((By.CSS_SELECTOR, "a[data-item-id='authority']")),
-            )
-        )
-    except Exception:
-        time.sleep(2)
+def _name_matches_title(name: str, title: str) -> bool:
+    """Ritorna True se almeno il 40% delle parole significative del nome sono nel titolo."""
+    name_words = [w for w in name.strip().lower().split() if len(w) > 2]
+    if not name_words:
+        return True
+    title_norm = title.strip().lower()
+    matches = sum(1 for w in name_words if w in title_norm)
+    return (matches / len(name_words)) >= 0.4
 
 
-def _get_panel_title(driver) -> str:
+def _wait_for_panel_ready(driver, expected_name: str, timeout: int = 12) -> bool:
     """
-    Legge il titolo h1 della scheda attualmente aperta.
-    Previene contaminazione cross-scheda.
+    Aspetta attivamente che:
+    1. L'URL contenga /maps/place/
+    2. L'h1 sia presente e non vuoto
+    3. L'h1 corrisponda al nome atteso
+
+    Fa polling ogni 0.5s fino a timeout.
+    Ritorna True se la scheda e' pronta, False se scaduto il timeout.
+
+    Questo e' il fix centrale per la contaminazione DOM cross-scheda:
+    non estraiamo MAI dati finche' la scheda giusta non e' completamente
+    caricata e il titolo corrisponde.
     """
-    for sel in ["h1.DUwDvf", "h1.fontHeadlineLarge", "h1"]:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
         try:
-            els = driver.find_elements(By.CSS_SELECTOR, sel)
-            if els:
-                t = els[0].text.strip()
-                if t:
-                    return t
-        except:
-            continue
-    return ""
+            current_url = driver.current_url
+            if "/maps/place/" not in current_url:
+                time.sleep(0.5)
+                continue
+
+            # Leggi h1
+            h1_text = ""
+            for sel in ["h1.DUwDvf", "h1.fontHeadlineLarge", "h1"]:
+                els = driver.find_elements(By.CSS_SELECTOR, sel)
+                if els:
+                    h1_text = els[0].text.strip()
+                    if h1_text:
+                        break
+
+            if not h1_text:
+                time.sleep(0.5)
+                continue
+
+            if _name_matches_title(expected_name, h1_text):
+                # Scheda corretta caricata — aspetta ancora 1s per il DOM completo
+                time.sleep(1.0)
+                return True
+            else:
+                # h1 presente ma e' ancora la scheda vecchia, aspetta
+                logger.debug(
+                    f"[Wait panel] h1='{h1_text}' != atteso='{expected_name}', aspetto..."
+                )
+                time.sleep(0.5)
+
+        except Exception as e:
+            logger.debug(f"[Wait panel] Eccezione: {e}")
+            time.sleep(0.5)
+
+    logger.warning(
+        f"[Wait panel] Timeout ({timeout}s) in attesa scheda per '{expected_name}'"
+    )
+    return False
 
 
 def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll_times: int = 10):
@@ -225,7 +252,7 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
     - max_results: numero massimo di risultati per keyword
     - scroll_times: quante volte scrollare il pannello
     - dedup cross-keyword: non riscrapa lo stesso posto nella stessa run
-    - anti-contaminazione: verifica titolo h1 prima di estrarre dati
+    - anti-contaminazione: polling attivo su h1 finche' la scheda giusta e' caricata
     """
     results = []
     seen_in_run: set = set()
@@ -378,7 +405,7 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
                     # --- Dedup cross-keyword in-run ---
                     run_key = (name.strip().lower(), comune_attuale.strip().lower())
                     if run_key in seen_in_run:
-                        logger.info(f"[Dedup run] Già scrapato questa run, saltato: {name}")
+                        logger.info(f"[Dedup run] Gia' scrapato questa run, saltato: {name}")
                         continue
 
                     logger.info(f"Apertura dettagli per: {name}")
@@ -395,24 +422,23 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
                             lambda: driver.execute_script("arguments[0].dispatchEvent(new MouseEvent('click', {bubbles: true}));", element)
                         ]
 
-                        success = False
+                        clicked = False
                         for click_method in click_methods:
                             try:
                                 click_method()
-                                time.sleep(1.5)
-                                if "/maps/place/" in driver.current_url:
-                                    success = True
-                                    break
+                                time.sleep(0.5)
+                                clicked = True
+                                break
                             except:
                                 continue
 
-                        if not success:
+                        if not clicked:
+                            logger.warning(f"Nessun metodo click funzionato per: {name}")
                             try:
                                 driver.get(current_list_page_url)
                                 time.sleep(1)
                             except:
-                                driver.get(url)
-                                time.sleep(1.5)
+                                pass
                             continue
 
                     except Exception:
@@ -422,42 +448,31 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
                             pass
                         continue
 
-                    # --- Aspetta che la scheda sia caricata ---
-                    _wait_for_place_panel(driver)
-
                     # ================================================================
-                    # ANTI-CONTAMINAZIONE: verifica titolo h1 prima di estrarre dati
+                    # WAIT ATTIVO — polling ogni 0.5s finche':
+                    #   - URL contiene /maps/place/
+                    #   - h1 e' presente e corrisponde al nome atteso
+                    #   - +1s extra dopo match per DOM completo
+                    # Questo e' l'unico guard contro contaminazione cross-scheda.
                     # ================================================================
-                    panel_title = _get_panel_title(driver)
-                    if panel_title and name:
-                        name_norm = name.strip().lower()
-                        title_norm = panel_title.strip().lower()
-                        name_words = [w for w in name_norm.split() if len(w) > 2]
-                        if name_words:
-                            matches = sum(1 for w in name_words if w in title_norm)
-                            ratio = matches / len(name_words)
-                            if ratio < 0.4:
-                                logger.warning(
-                                    f"[Anti-contaminazione] Titolo scheda '{panel_title}' "
-                                    f"non corrisponde a '{name}' (ratio={ratio:.2f}) — saltato"
-                                )
-                                try:
-                                    driver.get(current_list_page_url)
-                                    time.sleep(1.5)
-                                except:
-                                    pass
-                                continue
+                    panel_ready = _wait_for_panel_ready(driver, expected_name=name, timeout=12)
+                    if not panel_ready:
+                        logger.warning(f"[Skip] Scheda non pronta per '{name}', salto.")
+                        try:
+                            driver.get(current_list_page_url)
+                            time.sleep(1.5)
+                        except:
+                            pass
+                        continue
 
                     # --- URL reale della scheda Maps ---
                     maps_url = driver.current_url
 
-                    # --- Recensioni dalla scheda aperta ---
+                    # --- Recensioni ---
                     num_recensioni = _extract_num_recensioni(driver)
                     logger.info(f"Recensioni rilevate per {name}: {num_recensioni}")
 
-                    # ================================================================
-                    # RESET ESPLICITO
-                    # ================================================================
+                    # --- Reset variabili estrazione ---
                     address = ""
                     phone = ""
                     website = ""
