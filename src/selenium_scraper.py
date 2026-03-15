@@ -118,26 +118,70 @@ def _scroll_results_panel(driver, scroll_times: int = 10):
 
 
 def _extract_num_recensioni(driver) -> int:
+    """
+    Estrae il numero di recensioni dalla scheda aperta.
+
+    Strategia (in ordine di priorità):
+    1. span.ZkP5Je  aria-label tipo '4,6 stelle 253 recensioni'  (scheda aperta)
+    2. span.ZkP5Je  aria-label tipo '4,6 stelle 1 recensione'   (scheda aperta)
+    3. Qualsiasi [aria-label] che contiene 'recension' con numero
+    4. span.UY7F9   innerText tipo '(10)'                       (lista risultati)
+    5. Fallback body text regex \(\d+\)
+    """
     try:
-        selectors = [
-            "button[aria-label*='recensioni']",
-            "button[aria-label*='reviews']",
-            "span[aria-label*='recensioni']",
-            "span[aria-label*='reviews']",
-        ]
-        for sel in selectors:
+        # --- Strategia 1+2: span.ZkP5Je con aria-label ---
+        els = driver.find_elements(By.CSS_SELECTOR, "span.ZkP5Je")
+        for el in els:
+            label = el.get_attribute("aria-label") or ""
+            # Patterns: '4,6 stelle 253 recensioni' | '5,0 stelle 1 recensione'
+            m = re.search(r"(\d[\d\.,]*)\s+recension", label, re.IGNORECASE)
+            if m:
+                raw = m.group(1).replace(".", "").replace(",", "")
+                try:
+                    return int(raw)
+                except ValueError:
+                    continue
+
+        # --- Strategia 3: qualsiasi aria-label con 'recension' ---
+        for sel in [
+            "[aria-label*='recensioni']",
+            "[aria-label*='recensione']",
+            "[aria-label*='reviews']",
+            "[aria-label*='review']",
+        ]:
             els = driver.find_elements(By.CSS_SELECTOR, sel)
             for el in els:
                 label = el.get_attribute("aria-label") or ""
-                m = re.search(r"([\d\.\,]+)\s*(recensioni|reviews)", label, re.IGNORECASE)
+                m = re.search(r"([\d\.\,]+)\s*(recensioni|recensione|reviews|review)", label, re.IGNORECASE)
                 if m:
                     raw = m.group(1).replace(".", "").replace(",", "")
+                    try:
+                        return int(raw)
+                    except ValueError:
+                        continue
+
+        # --- Strategia 4: span.UY7F9 innerText tipo '(10)' ---
+        els = driver.find_elements(By.CSS_SELECTOR, "span.UY7F9")
+        for el in els:
+            txt = (el.text or "").strip()
+            m = re.fullmatch(r"\((\d[\d\.\,]*)\)", txt)
+            if m:
+                raw = m.group(1).replace(".", "").replace(",", "")
+                try:
                     return int(raw)
+                except ValueError:
+                    continue
+
+        # --- Strategia 5: fallback body text ---
         page_text = driver.find_element(By.TAG_NAME, "body").text
         m = re.search(r"\((\d[\d\.\,]*)\)", page_text)
         if m:
             raw = m.group(1).replace(".", "").replace(",", "")
-            return int(raw)
+            try:
+                return int(raw)
+            except ValueError:
+                pass
+
     except Exception as e:
         logger.debug(f"Errore lettura recensioni: {e}")
     return 0
@@ -161,8 +205,7 @@ def _wait_for_place_panel(driver, timeout: int = 8):
 def _get_panel_title(driver) -> str:
     """
     Legge il titolo h1 della scheda attualmente aperta.
-    Usato per verificare che la scheda corrisponda al nome atteso
-    prima di estrarre dati — previene contaminazione cross-scheda.
+    Previene contaminazione cross-scheda.
     """
     for sel in ["h1.DUwDvf", "h1.fontHeadlineLarge", "h1"]:
         try:
@@ -181,9 +224,8 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
     Scrape dei risultati utilizzando Selenium su Google Maps.
     - max_results: numero massimo di risultati per keyword
     - scroll_times: quante volte scrollare il pannello
-    - dedup cross-keyword: non riscrapa lo stesso posto (nome+comune) nella stessa run
-    - anti-contaminazione: verifica che il titolo h1 della scheda corrisponda al nome
-      atteso prima di estrarre website/phone/address
+    - dedup cross-keyword: non riscrapa lo stesso posto nella stessa run
+    - anti-contaminazione: verifica titolo h1 prima di estrarre dati
     """
     results = []
     seen_in_run: set = set()
@@ -384,15 +426,12 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
                     _wait_for_place_panel(driver)
 
                     # ================================================================
-                    # ANTI-CONTAMINAZIONE: verifica che il titolo h1 della scheda
-                    # corrisponda al nome atteso. Se non corrisponde, la scheda
-                    # precedente è ancora nel DOM — scarta e vai avanti.
+                    # ANTI-CONTAMINAZIONE: verifica titolo h1 prima di estrarre dati
                     # ================================================================
                     panel_title = _get_panel_title(driver)
                     if panel_title and name:
                         name_norm = name.strip().lower()
                         title_norm = panel_title.strip().lower()
-                        # Accetta se almeno 40% delle parole del nome sono nel titolo
                         name_words = [w for w in name_norm.split() if len(w) > 2]
                         if name_words:
                             matches = sum(1 for w in name_words if w in title_norm)
@@ -414,9 +453,10 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
 
                     # --- Recensioni dalla scheda aperta ---
                     num_recensioni = _extract_num_recensioni(driver)
+                    logger.info(f"Recensioni rilevate per {name}: {num_recensioni}")
 
                     # ================================================================
-                    # RESET ESPLICITO — obbligatorio, evita contaminazione residua
+                    # RESET ESPLICITO
                     # ================================================================
                     address = ""
                     phone = ""
@@ -478,7 +518,7 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
                         except:
                             continue
 
-                    # --- Sito web (solo dalla scheda aperta, mai dal DOM lista) ---
+                    # --- Sito web ---
                     website_selectors = [
                         "a[data-item-id='authority']",
                         "a[data-item-id='website']",
