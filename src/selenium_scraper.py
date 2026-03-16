@@ -118,14 +118,6 @@ def _scroll_results_panel(driver, scroll_times: int = 10):
 
 
 def _extract_num_recensioni(driver) -> int:
-    """
-    Estrae il numero di recensioni dalla scheda aperta.
-    Strategia (in ordine di priorita'):
-    1. span.ZkP5Je aria-label tipo '4,6 stelle 253 recensioni'
-    2. Qualsiasi [aria-label] con 'recension'
-    3. span.UY7F9 innerText tipo '(10)'
-    4. Fallback body text
-    """
     try:
         els = driver.find_elements(By.CSS_SELECTOR, "span.ZkP5Je")
         for el in els:
@@ -180,8 +172,20 @@ def _extract_num_recensioni(driver) -> int:
     return 0
 
 
+def _get_h1(driver) -> str:
+    for sel in ["h1.DUwDvf", "h1.fontHeadlineLarge", "h1"]:
+        try:
+            els = driver.find_elements(By.CSS_SELECTOR, sel)
+            if els:
+                t = els[0].text.strip()
+                if t:
+                    return t
+        except:
+            continue
+    return ""
+
+
 def _name_matches_title(name: str, title: str) -> bool:
-    """Ritorna True se almeno il 40% delle parole significative del nome sono nel titolo."""
     name_words = [w for w in name.strip().lower().split() if len(w) > 2]
     if not name_words:
         return True
@@ -191,19 +195,6 @@ def _name_matches_title(name: str, title: str) -> bool:
 
 
 def _wait_for_panel_ready(driver, expected_name: str, timeout: int = 12) -> bool:
-    """
-    Aspetta attivamente che:
-    1. L'URL contenga /maps/place/
-    2. L'h1 sia presente e non vuoto
-    3. L'h1 corrisponda al nome atteso
-
-    Fa polling ogni 0.5s fino a timeout.
-    Ritorna True se la scheda e' pronta, False se scaduto il timeout.
-
-    Questo e' il fix centrale per la contaminazione DOM cross-scheda:
-    non estraiamo MAI dati finche' la scheda giusta non e' completamente
-    caricata e il titolo corrisponde.
-    """
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -212,48 +203,64 @@ def _wait_for_panel_ready(driver, expected_name: str, timeout: int = 12) -> bool
                 time.sleep(0.5)
                 continue
 
-            # Leggi h1
-            h1_text = ""
-            for sel in ["h1.DUwDvf", "h1.fontHeadlineLarge", "h1"]:
-                els = driver.find_elements(By.CSS_SELECTOR, sel)
-                if els:
-                    h1_text = els[0].text.strip()
-                    if h1_text:
-                        break
-
+            h1_text = _get_h1(driver)
             if not h1_text:
                 time.sleep(0.5)
                 continue
 
             if _name_matches_title(expected_name, h1_text):
-                # Scheda corretta caricata — aspetta ancora 1s per il DOM completo
                 time.sleep(1.0)
                 return True
             else:
-                # h1 presente ma e' ancora la scheda vecchia, aspetta
-                logger.debug(
-                    f"[Wait panel] h1='{h1_text}' != atteso='{expected_name}', aspetto..."
-                )
+                logger.debug(f"[Wait panel] h1='{h1_text}' != atteso='{expected_name}', aspetto...")
                 time.sleep(0.5)
 
         except Exception as e:
             logger.debug(f"[Wait panel] Eccezione: {e}")
             time.sleep(0.5)
 
-    logger.warning(
-        f"[Wait panel] Timeout ({timeout}s) in attesa scheda per '{expected_name}'"
-    )
+    logger.warning(f"[Wait panel] Timeout ({timeout}s) in attesa scheda per '{expected_name}'")
     return False
 
 
+def _debug_dump_panel(driver, expected_name: str):
+    """
+    LOG DIAGNOSTICO TEMPORANEO — rimuovere dopo il fix.
+    Dumpa URL, h1, tutti i link authority e tutti gli span ZkP5Je
+    presenti nel DOM al momento dell'estrazione.
+    """
+    try:
+        logger.info(f"[DEBUG] ===== DUMP scheda attesa: '{expected_name}' =====")
+        logger.info(f"[DEBUG] URL corrente: {driver.current_url}")
+        logger.info(f"[DEBUG] h1: '{_get_h1(driver)}'")
+
+        authority_els = driver.find_elements(By.CSS_SELECTOR, "a[data-item-id='authority']")
+        if authority_els:
+            for i, el in enumerate(authority_els):
+                logger.info(f"[DEBUG] authority[{i}] href='{el.get_attribute('href')}' text='{el.text.strip()}'")
+        else:
+            logger.info("[DEBUG] Nessun link authority nel DOM")
+
+        zkp_els = driver.find_elements(By.CSS_SELECTOR, "span.ZkP5Je")
+        if zkp_els:
+            for i, el in enumerate(zkp_els):
+                logger.info(f"[DEBUG] ZkP5Je[{i}] aria-label='{el.get_attribute('aria-label')}'")
+        else:
+            logger.info("[DEBUG] Nessun span.ZkP5Je nel DOM")
+
+        rec_els = driver.find_elements(By.CSS_SELECTOR, "[aria-label*='recension']")
+        if rec_els:
+            for i, el in enumerate(rec_els[:5]):
+                logger.info(f"[DEBUG] recension[{i}] tag={el.tag_name} aria-label='{el.get_attribute('aria-label')}'")
+        else:
+            logger.info("[DEBUG] Nessun elemento aria-label*='recension' trovato")
+
+        logger.info(f"[DEBUG] ===== FINE DUMP =====")
+    except Exception as e:
+        logger.info(f"[DEBUG] Errore durante dump: {e}")
+
+
 def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll_times: int = 10):
-    """
-    Scrape dei risultati utilizzando Selenium su Google Maps.
-    - max_results: numero massimo di risultati per keyword
-    - scroll_times: quante volte scrollare il pannello
-    - dedup cross-keyword: non riscrapa lo stesso posto nella stessa run
-    - anti-contaminazione: polling attivo su h1 finche' la scheda giusta e' caricata
-    """
     results = []
     seen_in_run: set = set()
 
@@ -369,7 +376,6 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
                     driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", element)
                     time.sleep(1)
 
-                    # --- Leggi nome dalla card della lista ---
                     name = ""
                     name_selectors = [
                         "h3", ".qBF1Pd", ".fontHeadlineSmall", "[jsan*='fontHeadlineSmall']",
@@ -402,7 +408,6 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
                         logger.warning("Nome non trovato, risultato saltato")
                         continue
 
-                    # --- Dedup cross-keyword in-run ---
                     run_key = (name.strip().lower(), comune_attuale.strip().lower())
                     if run_key in seen_in_run:
                         logger.info(f"[Dedup run] Gia' scrapato questa run, saltato: {name}")
@@ -448,13 +453,6 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
                             pass
                         continue
 
-                    # ================================================================
-                    # WAIT ATTIVO — polling ogni 0.5s finche':
-                    #   - URL contiene /maps/place/
-                    #   - h1 e' presente e corrisponde al nome atteso
-                    #   - +1s extra dopo match per DOM completo
-                    # Questo e' l'unico guard contro contaminazione cross-scheda.
-                    # ================================================================
                     panel_ready = _wait_for_panel_ready(driver, expected_name=name, timeout=12)
                     if not panel_ready:
                         logger.warning(f"[Skip] Scheda non pronta per '{name}', salto.")
@@ -465,19 +463,19 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
                             pass
                         continue
 
-                    # --- URL reale della scheda Maps ---
-                    maps_url = driver.current_url
+                    # ================================================================
+                    # DEBUG DIAGNOSTICO TEMPORANEO — rimuovere dopo il fix
+                    # ================================================================
+                    _debug_dump_panel(driver, name)
 
-                    # --- Recensioni ---
+                    maps_url = driver.current_url
                     num_recensioni = _extract_num_recensioni(driver)
                     logger.info(f"Recensioni rilevate per {name}: {num_recensioni}")
 
-                    # --- Reset variabili estrazione ---
                     address = ""
                     phone = ""
                     website = ""
 
-                    # --- Indirizzo ---
                     address_selectors = [
                         "button[data-item-id='address']",
                         "button[aria-label*='Indirizzo']",
@@ -508,7 +506,6 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
                         except:
                             continue
 
-                    # --- Telefono ---
                     phone_selectors = [
                         "button[data-item-id='phone:tel']",
                         "button[aria-label*='telefono']",
@@ -533,7 +530,6 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
                         except:
                             continue
 
-                    # --- Sito web ---
                     website_selectors = [
                         "a[data-item-id='authority']",
                         "a[data-item-id='website']",
