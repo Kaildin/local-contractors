@@ -117,56 +117,83 @@ def _scroll_results_panel(driver, scroll_times: int = 10):
             time.sleep(0.5)
 
 
-def _extract_num_recensioni(driver) -> int:
+def _extract_place_url_from_element(element) -> str:
     """
-    Estrae il numero di recensioni dalla scheda Google Maps aperta.
+    Estrae l'href /maps/place/... dall'elemento risultato nella lista.
+    Navighiamo direttamente alla scheda invece di cliccare sull'overlay.
     """
     try:
-        rating_selectors = [
-            "button[jsaction*='pane.rating']",
-            "button[aria-label*='stell']",
-            "button[aria-label*='star']",
-            "div[jsaction*='pane.rating']",
-            "span[aria-label*='stell']",
-            "span[aria-label*='star']",
-        ]
-        for sel in rating_selectors:
-            els = driver.find_elements(By.CSS_SELECTOR, sel)
-            for el in els:
-                txt = (el.text or "").strip()
-                logger.debug(f"[Recensioni] selettore='{sel}' text='{txt}'")
-                if not txt:
-                    continue
-                m = re.search(r"\(([\d][\d\.,]*)\)", txt)
-                if m:
-                    raw = m.group(1).replace(".", "").replace(",", "")
-                    try:
-                        n = int(raw)
-                        if n > 0:
-                            return n
-                    except ValueError:
-                        pass
-                m2 = re.search(r"([\d][\d\.,]*)\s*(?:recensioni?|reviews?)", txt, re.IGNORECASE)
-                if m2:
-                    raw = m2.group(1).replace(".", "").replace(",", "")
-                    try:
-                        n = int(raw)
-                        if n > 0:
-                            return n
-                    except ValueError:
-                        pass
+        # L'elemento article contiene un <a href='/maps/place/...'>
+        links = element.find_elements(By.CSS_SELECTOR, "a[href*='/maps/place/']")
+        if links:
+            href = links[0].get_attribute("href") or ""
+            if href:
+                return href
+        # Fallback: l'elemento stesso potrebbe essere un <a>
+        tag = element.tag_name
+        if tag == "a":
+            href = element.get_attribute("href") or ""
+            if "/maps/place/" in href:
+                return href
+    except Exception as e:
+        logger.debug(f"[ExtractURL] Errore: {e}")
+    return ""
 
+
+def _extract_num_recensioni(driver) -> int:
+    """
+    Estrae il numero di recensioni dalla scheda Google Maps.
+    Strategia primaria: span[role='img'][aria-label*='recension']
+    Il formato e': aria-label='N recensioni' oppure '(N)' come testo.
+    """
+    try:
+        # Strategia 1: span role=img con aria-label recensioni (elemento trovato nell'inspector)
+        els = driver.find_elements(By.CSS_SELECTOR, "span[role='img'][aria-label*='recension']")
+        for el in els:
+            aria = el.get_attribute("aria-label") or ""
+            txt = (el.text or "").strip()
+            logger.debug(f"[Recensioni] span[role=img] aria='{aria}' text='{txt}'")
+            # Formato aria-label: '127 recensioni' o '1 recensione'
+            m = re.search(r"([\d][\d\.,]*)\s+recension", aria, re.IGNORECASE)
+            if m:
+                raw = m.group(1).replace(".", "").replace(",", "")
+                try:
+                    n = int(raw)
+                    if n > 0:
+                        return n
+                except ValueError:
+                    pass
+            # Formato testo: '(127)'
+            m2 = re.search(r"\(([\d][\d\.,]*)\)", txt)
+            if m2:
+                raw = m2.group(1).replace(".", "").replace(",", "")
+                try:
+                    n = int(raw)
+                    if n > 0:
+                        return n
+                except ValueError:
+                    pass
+
+        # Strategia 2: span role=img con aria-label stelle (stesso nodo o vicino)
+        els2 = driver.find_elements(By.CSS_SELECTOR, "span[role='img'][aria-label*='stell']")
+        for el in els2:
+            aria = el.get_attribute("aria-label") or ""
+            logger.debug(f"[Recensioni] span[role=img][stell] aria='{aria}'")
+            m = re.search(r"([\d][\d\.,]*)\s+recension", aria, re.IGNORECASE)
+            if m:
+                raw = m.group(1).replace(".", "").replace(",", "")
+                try:
+                    n = int(raw)
+                    if n > 0:
+                        return n
+                except ValueError:
+                    pass
+
+        # Strategia 3: body text
         page_text = driver.find_element(By.TAG_NAME, "body").text
-        m = re.search(r"\(([\d][\d\.,]*)\)\s*(?:recensioni?|reviews?)", page_text, re.IGNORECASE)
+        m = re.search(r"([\d][\d\.,]*)\s+(?:recensioni?|reviews?)", page_text, re.IGNORECASE)
         if m:
             raw = m.group(1).replace(".", "").replace(",", "")
-            try:
-                return int(raw)
-            except ValueError:
-                pass
-        m2 = re.search(r"([\d][\d\.,]*)\s+(?:recensioni?|reviews?)", page_text, re.IGNORECASE)
-        if m2:
-            raw = m2.group(1).replace(".", "").replace(",", "")
             try:
                 return int(raw)
             except ValueError:
@@ -199,7 +226,11 @@ def _name_matches_title(name: str, title: str) -> bool:
     return (matches / len(name_words)) >= 0.4
 
 
-def _wait_for_panel_ready(driver, expected_name: str, timeout: int = 12) -> bool:
+def _wait_for_place_page(driver, expected_name: str, timeout: int = 12) -> bool:
+    """
+    Attende che la pagina /maps/place/ sia completamente caricata.
+    Verifica URL + h1 + presenza di almeno un button nel pannello.
+    """
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -207,74 +238,30 @@ def _wait_for_panel_ready(driver, expected_name: str, timeout: int = 12) -> bool
             if "/maps/place/" not in current_url:
                 time.sleep(0.5)
                 continue
-
             h1_text = _get_h1(driver)
             if not h1_text:
                 time.sleep(0.5)
                 continue
-
             if _name_matches_title(expected_name, h1_text):
-                time.sleep(1.0)
-                return True
-            else:
-                logger.debug(f"[Wait panel] h1='{h1_text}' != atteso='{expected_name}', aspetto...")
+                # Aspetta che il pannello principale abbia almeno i bottoni azione
+                panels = driver.find_elements(By.CSS_SELECTOR, "div[role='main']")
+                if panels:
+                    btns = panels[0].find_elements(By.TAG_NAME, "button")
+                    if len(btns) >= 3:
+                        time.sleep(0.5)
+                        return True
                 time.sleep(0.5)
-
+            else:
+                logger.debug(f"[Wait] h1='{h1_text}' != atteso='{expected_name}'")
+                time.sleep(0.5)
         except Exception as e:
-            logger.debug(f"[Wait panel] Eccezione: {e}")
+            logger.debug(f"[Wait] Eccezione: {e}")
             time.sleep(0.5)
-
-    logger.warning(f"[Wait panel] Timeout ({timeout}s) in attesa scheda per '{expected_name}'")
+    logger.warning(f"[Wait] Timeout ({timeout}s) per '{expected_name}'")
     return False
 
 
-def _debug_dump_panel(driver, expected_name: str):
-    """
-    LOG DIAGNOSTICO — dump completo bottoni + body text per capire la struttura reale del DOM.
-    Rimuovere dopo verifica.
-    """
-    try:
-        logger.info(f"[DEBUG] ===== DUMP scheda attesa: '{expected_name}' =====")
-        logger.info(f"[DEBUG] URL corrente: {driver.current_url}")
-        logger.info(f"[DEBUG] h1: '{_get_h1(driver)}'")
-
-        # Website
-        authority_els = driver.find_elements(By.CSS_SELECTOR, "a[data-item-id='authority']")
-        if authority_els:
-            for i, el in enumerate(authority_els):
-                logger.info(f"[DEBUG] authority[{i}] href='{el.get_attribute('href')}' text='{el.text.strip()}'")
-        else:
-            logger.info("[DEBUG] Nessun link authority nel DOM")
-
-        # Dump TUTTI i bottoni nel pannello principale (max 15)
-        main_panels = driver.find_elements(By.CSS_SELECTOR, "div[role='main']")
-        scope = main_panels[0] if main_panels else driver
-        all_buttons = scope.find_elements(By.TAG_NAME, "button")
-        logger.info(f"[DEBUG] Totale <button> nel pannello: {len(all_buttons)}")
-        for i, btn in enumerate(all_buttons[:15]):
-            txt = (btn.text or "").strip().replace("\n", " ")
-            aria = btn.get_attribute("aria-label") or ""
-            jsaction = btn.get_attribute("jsaction") or ""
-            if txt or aria:
-                logger.info(f"[DEBUG] btn[{i}] text='{txt[:80]}' aria='{aria[:80]}' jsaction='{jsaction[:60]}'")
-
-        # Prime 20 righe body text (formato stelle/recensioni)
-        body_lines = driver.find_element(By.TAG_NAME, "body").text.split("\n")
-        logger.info("[DEBUG] BODY TEXT (prime 20 righe):")
-        for line in body_lines[:20]:
-            if line.strip():
-                logger.info(f"[DEBUG]   | {line.strip()}")
-
-        logger.info(f"[DEBUG] ===== FINE DUMP =====")
-    except Exception as e:
-        logger.info(f"[DEBUG] Errore durante dump: {e}")
-
-
 def _get_main_panel(driver):
-    """
-    Restituisce il contenitore principale della scheda dettaglio (div[role='main']).
-    Se non trovato, restituisce il driver stesso come fallback.
-    """
     try:
         panels = driver.find_elements(By.CSS_SELECTOR, "div[role='main']")
         if panels:
@@ -387,266 +374,177 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
                 logger.warning(f"Nessun risultato trovato per {keyword} {comune_attuale}")
                 continue
 
-            n_to_process = min(max_results, len(result_elements))
-            for i in range(n_to_process):
-                try:
-                    logger.info(f"Elaborazione risultato {i+1}/{n_to_process}")
-
-                    result_elements = driver.find_elements(By.CSS_SELECTOR, used_selector)
-                    if i >= len(result_elements):
-                        break
-
-                    element = result_elements[i]
-                    driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", element)
-                    time.sleep(1)
-
-                    name = ""
-                    name_selectors = [
-                        "h3", ".qBF1Pd", ".fontHeadlineSmall", "[jsan*='fontHeadlineSmall']",
-                        ".section-result-title", "span.OSrXXb", "[jstcache]", "[class*='title']"
-                    ]
-                    for ns in name_selectors:
-                        try:
-                            name_elements = element.find_elements(By.CSS_SELECTOR, ns)
-                            if name_elements:
-                                name = name_elements[0].text.strip()
-                                if name: break
-                        except:
-                            continue
-
-                    if not name:
-                        try:
-                            name = driver.execute_script("""
-                                var el = arguments[0];
-                                var headers = el.querySelectorAll('h1,h2,h3,h4,h5,.fontHeadlineSmall,[class*="title"],[class*="name"]');
-                                if (headers && headers.length > 0) return headers[0].innerText;
-                                return el.innerText.split('\\n')[0];
-                            """, element)
-                        except:
-                            pass
-
-                    if not name:
-                        name = element.get_attribute("aria-label") or ""
-
-                    if not name:
-                        logger.warning("Nome non trovato, risultato saltato")
-                        continue
-
-                    run_key = (name.strip().lower(), comune_attuale.strip().lower())
-                    if run_key in seen_in_run:
-                        logger.info(f"[Dedup run] Gia' scrapato questa run, saltato: {name}")
-                        continue
-
-                    logger.info(f"Apertura dettagli per: {name}")
-                    current_list_page_url = driver.current_url
-
+            # Pre-estrai gli URL delle schede PRIMA di navigare via
+            place_urls = []
+            for el in result_elements[:max_results]:
+                href = _extract_place_url_from_element(el)
+                # Estrai anche il nome dall'elemento per il dedup
+                name_candidate = ""
+                for ns in ["h3", ".qBF1Pd", ".fontHeadlineSmall", "[jsan*='fontHeadlineSmall']"]:
                     try:
-                        driver.execute_script("arguments[0].scrollIntoView({behavior: 'smooth', block: 'center'});", element)
-                        time.sleep(0.5)
-
-                        click_methods = [
-                            lambda: element.click(),
-                            lambda: ActionChains(driver).move_to_element(element).click().perform(),
-                            lambda: driver.execute_script("arguments[0].click();", element),
-                            lambda: driver.execute_script("arguments[0].dispatchEvent(new MouseEvent('click', {bubbles: true}));", element)
-                        ]
-
-                        clicked = False
-                        for click_method in click_methods:
-                            try:
-                                click_method()
-                                time.sleep(0.5)
-                                clicked = True
+                        ne = el.find_elements(By.CSS_SELECTOR, ns)
+                        if ne:
+                            name_candidate = ne[0].text.strip()
+                            if name_candidate:
                                 break
-                            except:
-                                continue
-
-                        if not clicked:
-                            logger.warning(f"Nessun metodo click funzionato per: {name}")
-                            try:
-                                driver.get(current_list_page_url)
-                                time.sleep(1)
-                            except:
-                                pass
-                            continue
-
-                    except Exception:
-                        try:
-                            driver.get(current_list_page_url)
-                        except:
-                            pass
-                        continue
-
-                    panel_ready = _wait_for_panel_ready(driver, expected_name=name, timeout=12)
-                    if not panel_ready:
-                        logger.warning(f"[Skip] Scheda non pronta per '{name}', salto.")
-                        try:
-                            driver.get(current_list_page_url)
-                            time.sleep(1.5)
-                        except:
-                            pass
-                        continue
-
-                    _debug_dump_panel(driver, name)
-
-                    maps_url = driver.current_url
-                    num_recensioni = _extract_num_recensioni(driver)
-                    logger.info(f"Recensioni rilevate per {name}: {num_recensioni}")
-
-                    address = ""
-                    phone = ""
-                    website = ""
-
-                    address_selectors = [
-                        "button[data-item-id='address']",
-                        "button[aria-label*='Indirizzo']",
-                        "button[aria-label*='indirizzo']",
-                        "button[aria-label*='Address']",
-                        "button[aria-label*='address']",
-                        "[data-item-id*='address']",
-                    ]
-                    for selector in address_selectors:
-                        try:
-                            addr_elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                            if addr_elements:
-                                for ae in addr_elements:
-                                    addr_text = ae.text.strip() or ae.get_attribute("aria-label") or ""
-                                    if addr_text:
-                                        if _looks_like_google_status_block(addr_text):
-                                            continue
-                                        if not _looks_like_address(addr_text):
-                                            continue
-                                        temp = clean_extracted_text(addr_text)
-                                        if name and name.lower() in temp.lower() and len(temp) > len(name) + 5:
-                                            if re.search(r'\d+[.,]\d+\(\d+\)', temp):
-                                                continue
-                                        address = temp
-                                        break
-                                if address:
-                                    break
-                        except:
-                            continue
-
-                    phone_selectors = [
-                        "button[data-item-id='phone:tel']",
-                        "button[aria-label*='telefono']",
-                        "button[aria-label*='phone']",
-                        "button[data-tooltip*='telefono']",
-                        "[data-item-id*='phone']",
-                        "button[aria-label*='call']",
-                        ".rogA2c"
-                    ]
-                    for selector in phone_selectors:
-                        try:
-                            phone_elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                            if phone_elements:
-                                for pe in phone_elements:
-                                    phone_text = pe.text.strip() or pe.get_attribute("aria-label")
-                                    if phone_text:
-                                        phone = clean_extracted_text(phone_text)
-                                        if re.search(r'\d', phone):
-                                            break
-                                if phone and re.search(r'\d', phone):
-                                    break
-                        except:
-                            continue
-
-                    main_panel = _get_main_panel(driver)
-
-                    website_selectors = [
-                        "a[data-item-id='authority']",
-                        "a[data-item-id='website']",
-                        "a[aria-label*='Sito web']",
-                        "a[aria-label*='sito web']",
-                        "a[aria-label*='Website']",
-                        "a[aria-label*='website']",
-                        "a[href^='http'][data-item-id]",
-                    ]
-
-                    for _ in range(10):
-                        try:
-                            auth_els = main_panel.find_elements(By.CSS_SELECTOR, "a[data-item-id='authority']")
-                            if auth_els:
-                                href_check = auth_els[0].get_attribute("href") or ""
-                                if href_check:
-                                    break
-                            else:
-                                break
-                        except Exception:
-                            break
-                        time.sleep(0.5)
-
-                    for selector in website_selectors:
-                        try:
-                            web_elements = main_panel.find_elements(By.CSS_SELECTOR, selector)
-                            if web_elements:
-                                for we in web_elements:
-                                    href = we.get_attribute("href") or ""
-                                    href = _extract_real_url_if_google_redirect(href)
-                                    if _is_valid_external_site(href):
-                                        website = href
-                                        break
-                                    if not website:
-                                        web_text = we.text.strip() or we.get_attribute("aria-label") or ""
-                                        if web_text and ("sito web:" in web_text.lower() or "website:" in web_text.lower()):
-                                            site_match = re.search(r'https?://[^\s"\']+', web_text)
-                                            if site_match:
-                                                cand = _extract_real_url_if_google_redirect(site_match.group(0))
-                                                if _is_valid_external_site(cand):
-                                                    website = cand
-                                                    break
-                                if website:
-                                    break
-                        except:
-                            continue
-
-                    if not website:
-                        logger.info(f"Sito web non trovato per {name}")
-
-                    address = sanitize_address(address)
-                    website = sanitize_website(website)
-
-                    result = {
-                        "comune": comune_attuale,
-                        "keyword": keyword,
-                        "nome": name,
-                        "indirizzo": address,
-                        "telefono": phone,
-                        "sito_web": website,
-                        "num_recensioni": num_recensioni,
-                        "maps_url": maps_url,
-                    }
-
-                    results.append(result)
-                    seen_in_run.add(run_key)
-
-                    try:
-                        driver.get(current_list_page_url)
-                        time.sleep(1.5)
                     except:
-                        try:
-                            driver.back()
-                            time.sleep(1.5)
-                        except:
-                            driver.get(url)
-                            time.sleep(2)
-
-                except Exception as e:
-                    logger.error(f"Errore nell'estrazione del risultato: {str(e)}")
+                        continue
+                if not name_candidate:
                     try:
-                        driver.get(url)
-                        time.sleep(2)
-                        for selector in selectors_to_try:
-                            try:
-                                temp_elements = driver.find_elements(By.CSS_SELECTOR, selector)
-                                if temp_elements and len(temp_elements) > 0:
-                                    result_elements = temp_elements
-                                    used_selector = selector
-                                    break
-                            except:
-                                continue
+                        name_candidate = el.get_attribute("aria-label") or ""
                     except:
                         pass
+                place_urls.append({"href": href, "name": name_candidate})
+
+            n_to_process = min(max_results, len(place_urls))
+            for i in range(n_to_process):
+                entry = place_urls[i]
+                place_href = entry["href"]
+                name = entry["name"]
+
+                logger.info(f"Elaborazione risultato {i+1}/{n_to_process}")
+
+                if not name:
+                    logger.warning("Nome non trovato, risultato saltato")
+                    continue
+
+                run_key = (name.strip().lower(), comune_attuale.strip().lower())
+                if run_key in seen_in_run:
+                    logger.info(f"[Dedup run] Gia' scrapato questa run, saltato: {name}")
+                    continue
+
+                if not place_href:
+                    logger.warning(f"URL scheda non trovato per '{name}', salto.")
+                    continue
+
+                logger.info(f"Navigazione diretta alla scheda: {name}")
+                try:
+                    driver.get(place_href)
+                except Exception as e_nav:
+                    logger.error(f"Errore navigazione scheda '{name}': {e_nav}")
+                    continue
+
+                panel_ready = _wait_for_place_page(driver, expected_name=name, timeout=15)
+                if not panel_ready:
+                    logger.warning(f"[Skip] Scheda non caricata per '{name}', salto.")
+                    continue
+
+                maps_url = driver.current_url
+                num_recensioni = _extract_num_recensioni(driver)
+                logger.info(f"Recensioni rilevate per {name}: {num_recensioni}")
+
+                address = ""
+                phone = ""
+                website = ""
+
+                address_selectors = [
+                    "button[data-item-id='address']",
+                    "button[aria-label*='Indirizzo']",
+                    "button[aria-label*='indirizzo']",
+                    "button[aria-label*='Address']",
+                    "button[aria-label*='address']",
+                    "[data-item-id*='address']",
+                ]
+                for selector in address_selectors:
+                    try:
+                        addr_elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                        if addr_elements:
+                            for ae in addr_elements:
+                                addr_text = ae.text.strip() or ae.get_attribute("aria-label") or ""
+                                if addr_text:
+                                    if _looks_like_google_status_block(addr_text):
+                                        continue
+                                    if not _looks_like_address(addr_text):
+                                        continue
+                                    temp = clean_extracted_text(addr_text)
+                                    if name and name.lower() in temp.lower() and len(temp) > len(name) + 5:
+                                        if re.search(r'\d+[.,]\d+\(\d+\)', temp):
+                                            continue
+                                    address = temp
+                                    break
+                            if address:
+                                break
+                    except:
+                        continue
+
+                phone_selectors = [
+                    "button[data-item-id='phone:tel']",
+                    "button[aria-label*='telefono']",
+                    "button[aria-label*='phone']",
+                    "button[data-tooltip*='telefono']",
+                    "[data-item-id*='phone']",
+                    "button[aria-label*='call']",
+                    ".rogA2c"
+                ]
+                for selector in phone_selectors:
+                    try:
+                        phone_elements = driver.find_elements(By.CSS_SELECTOR, selector)
+                        if phone_elements:
+                            for pe in phone_elements:
+                                phone_text = pe.text.strip() or pe.get_attribute("aria-label")
+                                if phone_text:
+                                    phone = clean_extracted_text(phone_text)
+                                    if re.search(r'\d', phone):
+                                        break
+                            if phone and re.search(r'\d', phone):
+                                break
+                    except:
+                        continue
+
+                main_panel = _get_main_panel(driver)
+
+                website_selectors = [
+                    "a[data-item-id='authority']",
+                    "a[data-item-id='website']",
+                    "a[aria-label*='Sito web']",
+                    "a[aria-label*='sito web']",
+                    "a[aria-label*='Website']",
+                    "a[aria-label*='website']",
+                    "a[href^='http'][data-item-id]",
+                ]
+                for selector in website_selectors:
+                    try:
+                        web_elements = main_panel.find_elements(By.CSS_SELECTOR, selector)
+                        if web_elements:
+                            for we in web_elements:
+                                href = we.get_attribute("href") or ""
+                                href = _extract_real_url_if_google_redirect(href)
+                                if _is_valid_external_site(href):
+                                    website = href
+                                    break
+                                if not website:
+                                    web_text = we.text.strip() or we.get_attribute("aria-label") or ""
+                                    if web_text and ("sito web:" in web_text.lower() or "website:" in web_text.lower()):
+                                        site_match = re.search(r'https?://[^\s"\']+', web_text)
+                                        if site_match:
+                                            cand = _extract_real_url_if_google_redirect(site_match.group(0))
+                                            if _is_valid_external_site(cand):
+                                                website = cand
+                                                break
+                            if website:
+                                break
+                    except:
+                        continue
+
+                if not website:
+                    logger.info(f"Sito web non trovato per {name}")
+
+                address = sanitize_address(address)
+                website = sanitize_website(website)
+
+                result = {
+                    "comune": comune_attuale,
+                    "keyword": keyword,
+                    "nome": name,
+                    "indirizzo": address,
+                    "telefono": phone,
+                    "sito_web": website,
+                    "num_recensioni": num_recensioni,
+                    "maps_url": maps_url,
+                }
+
+                results.append(result)
+                seen_in_run.add(run_key)
 
             pause_time = random.uniform(3, 5)
             time.sleep(pause_time)
