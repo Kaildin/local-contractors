@@ -120,50 +120,64 @@ def _scroll_results_panel(driver, scroll_times: int = 10):
 def _extract_num_recensioni(driver) -> int:
     """
     Estrae il numero di recensioni dalla scheda Google Maps aperta.
-    Usa selettori basati su aria-label (stabili) invece di class name hashati.
+
+    Google Maps mostra il conteggio recensioni come testo visibile nel bottone
+    delle stelle, in formati tipo '4,5(127)' oppure '4.5\u00b7127 recensioni'.
+    NON usa aria-label con il numero: gli unici elementi con aria-label*='recension'
+    sono i link del disclaimer legale.
     """
     try:
-        # Strategia 1: bottone/span stelle con aria-label che contiene sia stelle che recensioni
-        for sel in [
-            "button[aria-label*='stell'][aria-label*='recension']",
-            "button[aria-label*='star'][aria-label*='review']",
-            "span[aria-label*='stell'][aria-label*='recension']",
-            "span[aria-label*='star'][aria-label*='review']",
-        ]:
+        # Strategia 1: testo visibile del bottone stelle (formato piu' comune)
+        # Selettori stabili basati su jsaction o aria-label parziale
+        rating_selectors = [
+            "button[jsaction*='pane.rating']",
+            "button[aria-label*='stell']",
+            "button[aria-label*='star']",
+            "div[jsaction*='pane.rating']",
+            "span[aria-label*='stell']",
+            "span[aria-label*='star']",
+        ]
+        for sel in rating_selectors:
             els = driver.find_elements(By.CSS_SELECTOR, sel)
             for el in els:
-                label = el.get_attribute("aria-label") or ""
-                m = re.search(r"([\d\.,]+)\s*(recensioni|recensione|reviews|review)", label, re.IGNORECASE)
+                txt = (el.text or "").strip()
+                logger.debug(f"[Recensioni] selettore='{sel}' text='{txt}'")
+                if not txt:
+                    continue
+                # Formato '4,5(127)' o '4.5(1.234)'
+                m = re.search(r"\(([\d][\d\.,]*)\)", txt)
                 if m:
                     raw = m.group(1).replace(".", "").replace(",", "")
                     try:
-                        return int(raw)
+                        n = int(raw)
+                        if n > 0:
+                            return n
                     except ValueError:
-                        continue
-
-        # Strategia 2: qualsiasi elemento con aria-label contenente la parola recensioni/reviews
-        for sel in [
-            "[aria-label*='recensioni']",
-            "[aria-label*='recensione']",
-            "[aria-label*='reviews']",
-            "[aria-label*='review']",
-        ]:
-            els = driver.find_elements(By.CSS_SELECTOR, sel)
-            for el in els:
-                label = el.get_attribute("aria-label") or ""
-                m = re.search(r"([\d\.,]+)\s*(recensioni|recensione|reviews|review)", label, re.IGNORECASE)
-                if m:
-                    raw = m.group(1).replace(".", "").replace(",", "")
+                        pass
+                # Formato '4.5 · 127 recensioni' o '127 recensioni'
+                m2 = re.search(r"([\d][\d\.,]*)\s*(?:recensioni?|reviews?)", txt, re.IGNORECASE)
+                if m2:
+                    raw = m2.group(1).replace(".", "").replace(",", "")
                     try:
-                        return int(raw)
+                        n = int(raw)
+                        if n > 0:
+                            return n
                     except ValueError:
-                        continue
+                        pass
 
-        # Strategia 3: fallback su body text — cerca "(N.NNN) recension" nel testo visibile
+        # Strategia 2: body text — cerca pattern '(N)' adiacente a recension/review
         page_text = driver.find_element(By.TAG_NAME, "body").text
         m = re.search(r"\(([\d][\d\.,]*)\)\s*(?:recensioni?|reviews?)", page_text, re.IGNORECASE)
         if m:
             raw = m.group(1).replace(".", "").replace(",", "")
+            try:
+                return int(raw)
+            except ValueError:
+                pass
+        # Anche il pattern inverso: 'N recensioni'
+        m2 = re.search(r"([\d][\d\.,]*)\s+(?:recensioni?|reviews?)", page_text, re.IGNORECASE)
+        if m2:
+            raw = m2.group(1).replace(".", "").replace(",", "")
             try:
                 return int(raw)
             except ValueError:
@@ -227,9 +241,8 @@ def _wait_for_panel_ready(driver, expected_name: str, timeout: int = 12) -> bool
 
 def _debug_dump_panel(driver, expected_name: str):
     """
-    LOG DIAGNOSTICO TEMPORANEO — rimuovere dopo il fix.
-    Dumpa URL, h1, tutti i link authority e tutti gli span ZkP5Je
-    presenti nel DOM al momento dell'estrazione.
+    LOG DIAGNOSTICO — mostra i bottoni stelle presenti nel DOM.
+    Rimuovere dopo verifica.
     """
     try:
         logger.info(f"[DEBUG] ===== DUMP scheda attesa: '{expected_name}' =====")
@@ -243,12 +256,11 @@ def _debug_dump_panel(driver, expected_name: str):
         else:
             logger.info("[DEBUG] Nessun link authority nel DOM")
 
-        rec_els = driver.find_elements(By.CSS_SELECTOR, "[aria-label*='recension']")
-        if rec_els:
-            for i, el in enumerate(rec_els[:5]):
-                logger.info(f"[DEBUG] recension[{i}] tag={el.tag_name} aria-label='{el.get_attribute('aria-label')}'")
-        else:
-            logger.info("[DEBUG] Nessun elemento aria-label*='recension' trovato")
+        # Dump bottoni stelle per debug recensioni
+        for sel in ["button[jsaction*='pane.rating']", "button[aria-label*='stell']", "button[aria-label*='star']"]:
+            els = driver.find_elements(By.CSS_SELECTOR, sel)
+            for i, el in enumerate(els[:3]):
+                logger.info(f"[DEBUG] rating_btn sel='{sel}'[{i}] text='{el.text.strip()}' aria='{el.get_attribute('aria-label')}'")
 
         logger.info(f"[DEBUG] ===== FINE DUMP =====")
     except Exception as e:
@@ -258,7 +270,7 @@ def _debug_dump_panel(driver, expected_name: str):
 def _get_main_panel(driver):
     """
     Restituisce il contenitore principale della scheda dettaglio (div[role='main']).
-    Se non trovato, restituisce il driver stesso come fallback (ricerca globale).
+    Se non trovato, restituisce il driver stesso come fallback.
     """
     try:
         panels = driver.find_elements(By.CSS_SELECTOR, "div[role='main']")
@@ -472,9 +484,6 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
                             pass
                         continue
 
-                    # ================================================================
-                    # DEBUG DIAGNOSTICO TEMPORANEO — rimuovere dopo il fix
-                    # ================================================================
                     _debug_dump_panel(driver, name)
 
                     maps_url = driver.current_url
@@ -483,6 +492,13 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
 
                     address = ""
                     phone = ""
+                    # ----------------------------------------------------------------
+                    # FIX Bug 1 (root cause) — website DEVE essere resettato a ""
+                    # ad ogni iterazione. Senza questo reset, se il risultato N ha
+                    # un sito web e il risultato N+1 non ce l'ha, N+1 eredita il
+                    # sito di N perche' i selettori non trovano nulla e website
+                    # rimane al valore precedente.
+                    # ----------------------------------------------------------------
                     website = ""
 
                     address_selectors = [
@@ -539,11 +555,8 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
                         except:
                             continue
 
-                    # ----------------------------------------------------------------
-                    # FIX Bug 1 — Website contamination
-                    # Cerchiamo il link authority SOLO nel pannello principale (div[role='main'])
-                    # per evitare di leggere link residui della scheda precedente ancora nel DOM.
-                    # ----------------------------------------------------------------
+                    # Website: cerca scoped a div[role='main'] per evitare
+                    # residui DOM della scheda precedente
                     main_panel = _get_main_panel(driver)
 
                     website_selectors = [
@@ -556,20 +569,15 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
                         "a[href^='http'][data-item-id]",
                     ]
 
-                    # Attesa attiva: aspetta fino a 5s che l'authority link nel pannello
-                    # principale sia stabilizzato (href non vuoto o assente = niente sito web).
-                    authority_stable = False
+                    # Attesa attiva: max 5s per stabilizzazione del link authority
                     for _ in range(10):
                         try:
                             auth_els = main_panel.find_elements(By.CSS_SELECTOR, "a[data-item-id='authority']")
                             if auth_els:
                                 href_check = auth_els[0].get_attribute("href") or ""
                                 if href_check:
-                                    authority_stable = True
                                     break
                             else:
-                                # Nessun link authority nel pannello principale = attività senza sito
-                                authority_stable = True
                                 break
                         except Exception:
                             break
