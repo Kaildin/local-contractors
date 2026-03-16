@@ -134,53 +134,83 @@ def _extract_place_url_from_element(element) -> str:
     return ""
 
 
-def _extract_num_recensioni(driver) -> int:
+def _parse_recensioni_number(raw: str) -> int:
+    """Converte una stringa numerica (es. '1.234' o '1,234') in int."""
+    clean = raw.replace(".", "").replace(",", "").replace("\xa0", "").strip()
     try:
+        n = int(clean)
+        return n if n > 0 else 0
+    except ValueError:
+        return 0
+
+
+def _extract_num_recensioni(driver) -> int:
+    """
+    Estrae il numero di recensioni dalla scheda Google Maps.
+    Strategia 0 (piu' precisa): XPath contestualizzato nell'header TIHn2,
+      lo span con aria-label dentro fontBodyMedium dmRWX (stesso approccio
+      del repo zohaibbashir/Google-Maps-Scrapper).
+    Strategia 1: span[role='img'][aria-label*='recension'] su tutto il DOM.
+    Strategia 2: span[role='img'][aria-label*='stell'] su tutto il DOM.
+    Strategia 3: fallback body text.
+    """
+    try:
+        # --- Strategia 0: XPath header TIHn2 (piu' contestualizzato) ---
+        xpath_count = '//div[contains(@class,"TIHn2")]//div[contains(@class,"fontBodyMedium") and contains(@class,"dmRWX")]//span//span//span[@aria-label]'
+        els0 = driver.find_elements(By.XPATH, xpath_count)
+        for el in els0:
+            aria = el.get_attribute("aria-label") or ""
+            txt = (el.text or "").strip()
+            logger.debug(f"[Rec S0] aria='{aria}' text='{txt}'")
+            # Formato aria-label: 'N recensioni' / 'N reviews'
+            m = re.search(r"([\d][\d\.,\xa0]*)\s+(?:recensioni?|reviews?)", aria, re.IGNORECASE)
+            if m:
+                n = _parse_recensioni_number(m.group(1))
+                if n > 0:
+                    logger.debug(f"[Rec S0] trovato da aria-label: {n}")
+                    return n
+            # Formato testo: '(N)'
+            m2 = re.search(r"\(([\d][\d\.,\xa0]*)\)", txt)
+            if m2:
+                n = _parse_recensioni_number(m2.group(1))
+                if n > 0:
+                    logger.debug(f"[Rec S0] trovato da testo: {n}")
+                    return n
+
+        # --- Strategia 1: span[role='img'][aria-label*='recension'] ---
         els = driver.find_elements(By.CSS_SELECTOR, "span[role='img'][aria-label*='recension']")
         for el in els:
             aria = el.get_attribute("aria-label") or ""
             txt = (el.text or "").strip()
-            logger.debug(f"[Recensioni] span[role=img] aria='{aria}' text='{txt}'")
-            m = re.search(r"([\d][\d\.,]*)\s+recension", aria, re.IGNORECASE)
+            logger.debug(f"[Rec S1] aria='{aria}' text='{txt}'")
+            m = re.search(r"([\d][\d\.,\xa0]*)\s+recension", aria, re.IGNORECASE)
             if m:
-                raw = m.group(1).replace(".", "").replace(",", "")
-                try:
-                    n = int(raw)
-                    if n > 0:
-                        return n
-                except ValueError:
-                    pass
-            m2 = re.search(r"\(([\d][\d\.,]*)\)", txt)
+                n = _parse_recensioni_number(m.group(1))
+                if n > 0:
+                    return n
+            m2 = re.search(r"\(([\d][\d\.,\xa0]*)\)", txt)
             if m2:
-                raw = m2.group(1).replace(".", "").replace(",", "")
-                try:
-                    n = int(raw)
-                    if n > 0:
-                        return n
-                except ValueError:
-                    pass
+                n = _parse_recensioni_number(m2.group(1))
+                if n > 0:
+                    return n
 
+        # --- Strategia 2: span[role='img'][aria-label*='stell'] ---
         els2 = driver.find_elements(By.CSS_SELECTOR, "span[role='img'][aria-label*='stell']")
         for el in els2:
             aria = el.get_attribute("aria-label") or ""
-            m = re.search(r"([\d][\d\.,]*)\s+recension", aria, re.IGNORECASE)
+            m = re.search(r"([\d][\d\.,\xa0]*)\s+recension", aria, re.IGNORECASE)
             if m:
-                raw = m.group(1).replace(".", "").replace(",", "")
-                try:
-                    n = int(raw)
-                    if n > 0:
-                        return n
-                except ValueError:
-                    pass
+                n = _parse_recensioni_number(m.group(1))
+                if n > 0:
+                    return n
 
+        # --- Strategia 3: body text fallback ---
         page_text = driver.find_element(By.TAG_NAME, "body").text
-        m = re.search(r"([\d][\d\.,]*)\s+(?:recensioni?|reviews?)", page_text, re.IGNORECASE)
+        m = re.search(r"([\d][\d\.,\xa0]*)\s+(?:recensioni?|reviews?)", page_text, re.IGNORECASE)
         if m:
-            raw = m.group(1).replace(".", "").replace(",", "")
-            try:
-                return int(raw)
-            except ValueError:
-                pass
+            n = _parse_recensioni_number(m.group(1))
+            if n > 0:
+                return n
 
     except Exception as e:
         logger.debug(f"Errore lettura recensioni: {e}")
@@ -239,10 +269,6 @@ def _wait_for_place_page(driver, expected_name: str, timeout: int = 15) -> bool:
 
 
 def _wait_for_authority_link(driver, timeout: int = 6) -> bool:
-    """
-    Aspetta che l'elemento a[data-item-id='authority'] sia presente e abbia un href valido.
-    Restituisce True se trovato, False se timeout.
-    """
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -251,13 +277,11 @@ def _wait_for_authority_link(driver, timeout: int = 6) -> bool:
                 href = els[0].get_attribute("href") or ""
                 if href and _is_valid_external_site(href):
                     return True
-            # Se non c'e' authority link, non aspettare inutilmente
-            # Controlla se il pannello e' gia' stabile (almeno 5 button)
             panels = driver.find_elements(By.CSS_SELECTOR, "div[role='main']")
             if panels:
                 btns = panels[0].find_elements(By.TAG_NAME, "button")
                 if len(btns) >= 5:
-                    return False  # Pannello caricato, semplicemente non ha sito web
+                    return False
         except Exception:
             pass
         time.sleep(0.4)
@@ -367,7 +391,6 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
                 logger.warning(f"Nessun risultato trovato per {keyword} {comune_attuale}")
                 continue
 
-            # Pre-estrai URL + nomi dalla lista prima di navigare
             place_urls = []
             for el in result_elements[:max_results]:
                 href = _extract_place_url_from_element(el)
@@ -483,7 +506,6 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
                     except:
                         continue
 
-                # Aspetta che il link authority (sito web) sia caricato nel DOM
                 _wait_for_authority_link(driver, timeout=6)
 
                 website_selectors = [
@@ -495,7 +517,6 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
                     "a[aria-label*='website']",
                     "a[href^='http'][data-item-id]",
                 ]
-                # Cerca su driver intero, non su main_panel
                 for selector in website_selectors:
                     try:
                         web_elements = driver.find_elements(By.CSS_SELECTOR, selector)
