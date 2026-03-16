@@ -120,15 +120,8 @@ def _scroll_results_panel(driver, scroll_times: int = 10):
 def _extract_num_recensioni(driver) -> int:
     """
     Estrae il numero di recensioni dalla scheda Google Maps aperta.
-
-    Google Maps mostra il conteggio recensioni come testo visibile nel bottone
-    delle stelle, in formati tipo '4,5(127)' oppure '4.5\u00b7127 recensioni'.
-    NON usa aria-label con il numero: gli unici elementi con aria-label*='recension'
-    sono i link del disclaimer legale.
     """
     try:
-        # Strategia 1: testo visibile del bottone stelle (formato piu' comune)
-        # Selettori stabili basati su jsaction o aria-label parziale
         rating_selectors = [
             "button[jsaction*='pane.rating']",
             "button[aria-label*='stell']",
@@ -144,7 +137,6 @@ def _extract_num_recensioni(driver) -> int:
                 logger.debug(f"[Recensioni] selettore='{sel}' text='{txt}'")
                 if not txt:
                     continue
-                # Formato '4,5(127)' o '4.5(1.234)'
                 m = re.search(r"\(([\d][\d\.,]*)\)", txt)
                 if m:
                     raw = m.group(1).replace(".", "").replace(",", "")
@@ -154,7 +146,6 @@ def _extract_num_recensioni(driver) -> int:
                             return n
                     except ValueError:
                         pass
-                # Formato '4.5 · 127 recensioni' o '127 recensioni'
                 m2 = re.search(r"([\d][\d\.,]*)\s*(?:recensioni?|reviews?)", txt, re.IGNORECASE)
                 if m2:
                     raw = m2.group(1).replace(".", "").replace(",", "")
@@ -165,7 +156,6 @@ def _extract_num_recensioni(driver) -> int:
                     except ValueError:
                         pass
 
-        # Strategia 2: body text — cerca pattern '(N)' adiacente a recension/review
         page_text = driver.find_element(By.TAG_NAME, "body").text
         m = re.search(r"\(([\d][\d\.,]*)\)\s*(?:recensioni?|reviews?)", page_text, re.IGNORECASE)
         if m:
@@ -174,7 +164,6 @@ def _extract_num_recensioni(driver) -> int:
                 return int(raw)
             except ValueError:
                 pass
-        # Anche il pattern inverso: 'N recensioni'
         m2 = re.search(r"([\d][\d\.,]*)\s+(?:recensioni?|reviews?)", page_text, re.IGNORECASE)
         if m2:
             raw = m2.group(1).replace(".", "").replace(",", "")
@@ -241,7 +230,7 @@ def _wait_for_panel_ready(driver, expected_name: str, timeout: int = 12) -> bool
 
 def _debug_dump_panel(driver, expected_name: str):
     """
-    LOG DIAGNOSTICO — mostra i bottoni stelle presenti nel DOM.
+    LOG DIAGNOSTICO — dump completo bottoni + body text per capire la struttura reale del DOM.
     Rimuovere dopo verifica.
     """
     try:
@@ -249,6 +238,7 @@ def _debug_dump_panel(driver, expected_name: str):
         logger.info(f"[DEBUG] URL corrente: {driver.current_url}")
         logger.info(f"[DEBUG] h1: '{_get_h1(driver)}'")
 
+        # Website
         authority_els = driver.find_elements(By.CSS_SELECTOR, "a[data-item-id='authority']")
         if authority_els:
             for i, el in enumerate(authority_els):
@@ -256,11 +246,24 @@ def _debug_dump_panel(driver, expected_name: str):
         else:
             logger.info("[DEBUG] Nessun link authority nel DOM")
 
-        # Dump bottoni stelle per debug recensioni
-        for sel in ["button[jsaction*='pane.rating']", "button[aria-label*='stell']", "button[aria-label*='star']"]:
-            els = driver.find_elements(By.CSS_SELECTOR, sel)
-            for i, el in enumerate(els[:3]):
-                logger.info(f"[DEBUG] rating_btn sel='{sel}'[{i}] text='{el.text.strip()}' aria='{el.get_attribute('aria-label')}'")
+        # Dump TUTTI i bottoni nel pannello principale (max 15)
+        main_panels = driver.find_elements(By.CSS_SELECTOR, "div[role='main']")
+        scope = main_panels[0] if main_panels else driver
+        all_buttons = scope.find_elements(By.TAG_NAME, "button")
+        logger.info(f"[DEBUG] Totale <button> nel pannello: {len(all_buttons)}")
+        for i, btn in enumerate(all_buttons[:15]):
+            txt = (btn.text or "").strip().replace("\n", " ")
+            aria = btn.get_attribute("aria-label") or ""
+            jsaction = btn.get_attribute("jsaction") or ""
+            if txt or aria:
+                logger.info(f"[DEBUG] btn[{i}] text='{txt[:80]}' aria='{aria[:80]}' jsaction='{jsaction[:60]}'")
+
+        # Prime 20 righe body text (formato stelle/recensioni)
+        body_lines = driver.find_element(By.TAG_NAME, "body").text.split("\n")
+        logger.info("[DEBUG] BODY TEXT (prime 20 righe):")
+        for line in body_lines[:20]:
+            if line.strip():
+                logger.info(f"[DEBUG]   | {line.strip()}")
 
         logger.info(f"[DEBUG] ===== FINE DUMP =====")
     except Exception as e:
@@ -492,13 +495,6 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
 
                     address = ""
                     phone = ""
-                    # ----------------------------------------------------------------
-                    # FIX Bug 1 (root cause) — website DEVE essere resettato a ""
-                    # ad ogni iterazione. Senza questo reset, se il risultato N ha
-                    # un sito web e il risultato N+1 non ce l'ha, N+1 eredita il
-                    # sito di N perche' i selettori non trovano nulla e website
-                    # rimane al valore precedente.
-                    # ----------------------------------------------------------------
                     website = ""
 
                     address_selectors = [
@@ -555,8 +551,6 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
                         except:
                             continue
 
-                    # Website: cerca scoped a div[role='main'] per evitare
-                    # residui DOM della scheda precedente
                     main_panel = _get_main_panel(driver)
 
                     website_selectors = [
@@ -569,7 +563,6 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
                         "a[href^='http'][data-item-id]",
                     ]
 
-                    # Attesa attiva: max 5s per stabilizzazione del link authority
                     for _ in range(10):
                         try:
                             auth_els = main_panel.find_elements(By.CSS_SELECTOR, "a[data-item-id='authority']")
