@@ -135,8 +135,7 @@ def _extract_place_url_from_element(element) -> str:
 
 
 def _parse_recensioni_number(raw: str) -> int:
-    """Converte una stringa numerica (es. '1.234' o '1,234') in int."""
-    clean = raw.replace(".", "").replace(",", "").replace("\xa0", "").strip()
+    clean = re.sub(r'[^\d]', '', raw)
     try:
         n = int(clean)
         return n if n > 0 else 0
@@ -146,36 +145,68 @@ def _parse_recensioni_number(raw: str) -> int:
 
 def _extract_num_recensioni(driver) -> int:
     """
-    Estrae il numero di recensioni dalla scheda Google Maps.
-    Strategia 0 (piu' precisa): XPath contestualizzato nell'header TIHn2,
-      lo span con aria-label dentro fontBodyMedium dmRWX (stesso approccio
-      del repo zohaibbashir/Google-Maps-Scrapper).
-    Strategia 1: span[role='img'][aria-label*='recension'] su tutto il DOM.
-    Strategia 2: span[role='img'][aria-label*='stell'] su tutto il DOM.
-    Strategia 3: fallback body text.
+    Strategia 0: clicca il tab Recensioni, legge da div.jANrlb div.fontBodySmall
+                 (approccio semantico: segue l'interazione utente)
+    Strategia 1: span[role='img'][aria-label*='recension'] senza click
+    Strategia 2: span[role='img'][aria-label*='stell'] senza click
+    Strategia 3: body text fallback
+    Se il tab viene cliccato, torna indietro (back) dopo la lettura.
     """
+    current_url = ""
+    tab_clicked = False
+
     try:
-        # --- Strategia 0: XPath header TIHn2 (piu' contestualizzato) ---
-        xpath_count = '//div[contains(@class,"TIHn2")]//div[contains(@class,"fontBodyMedium") and contains(@class,"dmRWX")]//span//span//span[@aria-label]'
-        els0 = driver.find_elements(By.XPATH, xpath_count)
-        for el in els0:
-            aria = el.get_attribute("aria-label") or ""
-            txt = (el.text or "").strip()
-            logger.debug(f"[Rec S0] aria='{aria}' text='{txt}'")
-            # Formato aria-label: 'N recensioni' / 'N reviews'
-            m = re.search(r"([\d][\d\.,\xa0]*)\s+(?:recensioni?|reviews?)", aria, re.IGNORECASE)
-            if m:
-                n = _parse_recensioni_number(m.group(1))
-                if n > 0:
-                    logger.debug(f"[Rec S0] trovato da aria-label: {n}")
-                    return n
-            # Formato testo: '(N)'
-            m2 = re.search(r"\(([\d][\d\.,\xa0]*)\)", txt)
-            if m2:
-                n = _parse_recensioni_number(m2.group(1))
-                if n > 0:
-                    logger.debug(f"[Rec S0] trovato da testo: {n}")
-                    return n
+        current_url = driver.current_url
+
+        # --- Strategia 0: click tab Recensioni ---
+        tab_selectors = [
+            "button.hh2c6[aria-label*='Recensioni']",
+            "button.hh2c6[aria-label*='Reviews']",
+            "button[aria-label*='recensioni per']",
+            "button[aria-label*='reviews for']",
+            # fallback: qualsiasi button con testo Recensioni
+            "//button[contains(@aria-label,'ecensioni')]",
+        ]
+        tab_btn = None
+        for sel in tab_selectors:
+            try:
+                if sel.startswith("//"):
+                    els = driver.find_elements(By.XPATH, sel)
+                else:
+                    els = driver.find_elements(By.CSS_SELECTOR, sel)
+                if els:
+                    tab_btn = els[0]
+                    logger.debug(f"[Rec S0] Tab trovato con: {sel}")
+                    break
+            except:
+                continue
+
+        if tab_btn:
+            try:
+                driver.execute_script("arguments[0].click();", tab_btn)
+                tab_clicked = True
+                time.sleep(1.5)
+                # Leggi il conteggio da jANrlb
+                count_els = driver.find_elements(By.CSS_SELECTOR, "div.jANrlb div.fontBodySmall")
+                for cel in count_els:
+                    txt = (cel.text or "").strip()
+                    logger.debug(f"[Rec S0] jANrlb text='{txt}'")
+                    n = _parse_recensioni_number(txt)
+                    if n > 0:
+                        logger.info(f"[Rec S0] recensioni trovate via tab: {n}")
+                        return n
+                # Fallback nel pannello jANrlb: cerca span con numero
+                panel_els = driver.find_elements(By.CSS_SELECTOR, "div.jANrlb")
+                if panel_els:
+                    panel_text = panel_els[0].text
+                    m = re.search(r'([\d][\d\.\,\xa0]*)\s*(?:recensioni?|reviews?)', panel_text, re.IGNORECASE)
+                    if m:
+                        n = _parse_recensioni_number(m.group(1))
+                        if n > 0:
+                            logger.info(f"[Rec S0b] recensioni da jANrlb text: {n}")
+                            return n
+            except Exception as e:
+                logger.debug(f"[Rec S0] Errore click tab: {e}")
 
         # --- Strategia 1: span[role='img'][aria-label*='recension'] ---
         els = driver.find_elements(By.CSS_SELECTOR, "span[role='img'][aria-label*='recension']")
@@ -204,7 +235,7 @@ def _extract_num_recensioni(driver) -> int:
                 if n > 0:
                     return n
 
-        # --- Strategia 3: body text fallback ---
+        # --- Strategia 3: body text ---
         page_text = driver.find_element(By.TAG_NAME, "body").text
         m = re.search(r"([\d][\d\.,\xa0]*)\s+(?:recensioni?|reviews?)", page_text, re.IGNORECASE)
         if m:
@@ -214,6 +245,19 @@ def _extract_num_recensioni(driver) -> int:
 
     except Exception as e:
         logger.debug(f"Errore lettura recensioni: {e}")
+    finally:
+        # Se abbiamo cliccato il tab, torniamo alla scheda principale
+        if tab_clicked and current_url:
+            try:
+                driver.back()
+                time.sleep(1.0)
+            except Exception:
+                try:
+                    driver.get(current_url)
+                    time.sleep(1.0)
+                except Exception:
+                    pass
+
     return 0
 
 
