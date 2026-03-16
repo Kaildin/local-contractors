@@ -118,18 +118,12 @@ def _scroll_results_panel(driver, scroll_times: int = 10):
 
 
 def _extract_place_url_from_element(element) -> str:
-    """
-    Estrae l'href /maps/place/... dall'elemento risultato nella lista.
-    Navighiamo direttamente alla scheda invece di cliccare sull'overlay.
-    """
     try:
-        # L'elemento article contiene un <a href='/maps/place/...'>
         links = element.find_elements(By.CSS_SELECTOR, "a[href*='/maps/place/']")
         if links:
             href = links[0].get_attribute("href") or ""
             if href:
                 return href
-        # Fallback: l'elemento stesso potrebbe essere un <a>
         tag = element.tag_name
         if tag == "a":
             href = element.get_attribute("href") or ""
@@ -141,19 +135,12 @@ def _extract_place_url_from_element(element) -> str:
 
 
 def _extract_num_recensioni(driver) -> int:
-    """
-    Estrae il numero di recensioni dalla scheda Google Maps.
-    Strategia primaria: span[role='img'][aria-label*='recension']
-    Il formato e': aria-label='N recensioni' oppure '(N)' come testo.
-    """
     try:
-        # Strategia 1: span role=img con aria-label recensioni (elemento trovato nell'inspector)
         els = driver.find_elements(By.CSS_SELECTOR, "span[role='img'][aria-label*='recension']")
         for el in els:
             aria = el.get_attribute("aria-label") or ""
             txt = (el.text or "").strip()
             logger.debug(f"[Recensioni] span[role=img] aria='{aria}' text='{txt}'")
-            # Formato aria-label: '127 recensioni' o '1 recensione'
             m = re.search(r"([\d][\d\.,]*)\s+recension", aria, re.IGNORECASE)
             if m:
                 raw = m.group(1).replace(".", "").replace(",", "")
@@ -163,7 +150,6 @@ def _extract_num_recensioni(driver) -> int:
                         return n
                 except ValueError:
                     pass
-            # Formato testo: '(127)'
             m2 = re.search(r"\(([\d][\d\.,]*)\)", txt)
             if m2:
                 raw = m2.group(1).replace(".", "").replace(",", "")
@@ -174,11 +160,9 @@ def _extract_num_recensioni(driver) -> int:
                 except ValueError:
                     pass
 
-        # Strategia 2: span role=img con aria-label stelle (stesso nodo o vicino)
         els2 = driver.find_elements(By.CSS_SELECTOR, "span[role='img'][aria-label*='stell']")
         for el in els2:
             aria = el.get_attribute("aria-label") or ""
-            logger.debug(f"[Recensioni] span[role=img][stell] aria='{aria}'")
             m = re.search(r"([\d][\d\.,]*)\s+recension", aria, re.IGNORECASE)
             if m:
                 raw = m.group(1).replace(".", "").replace(",", "")
@@ -189,7 +173,6 @@ def _extract_num_recensioni(driver) -> int:
                 except ValueError:
                     pass
 
-        # Strategia 3: body text
         page_text = driver.find_element(By.TAG_NAME, "body").text
         m = re.search(r"([\d][\d\.,]*)\s+(?:recensioni?|reviews?)", page_text, re.IGNORECASE)
         if m:
@@ -226,16 +209,11 @@ def _name_matches_title(name: str, title: str) -> bool:
     return (matches / len(name_words)) >= 0.4
 
 
-def _wait_for_place_page(driver, expected_name: str, timeout: int = 12) -> bool:
-    """
-    Attende che la pagina /maps/place/ sia completamente caricata.
-    Verifica URL + h1 + presenza di almeno un button nel pannello.
-    """
+def _wait_for_place_page(driver, expected_name: str, timeout: int = 15) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
-            current_url = driver.current_url
-            if "/maps/place/" not in current_url:
+            if "/maps/place/" not in driver.current_url:
                 time.sleep(0.5)
                 continue
             h1_text = _get_h1(driver)
@@ -243,7 +221,6 @@ def _wait_for_place_page(driver, expected_name: str, timeout: int = 12) -> bool:
                 time.sleep(0.5)
                 continue
             if _name_matches_title(expected_name, h1_text):
-                # Aspetta che il pannello principale abbia almeno i bottoni azione
                 panels = driver.find_elements(By.CSS_SELECTOR, "div[role='main']")
                 if panels:
                     btns = panels[0].find_elements(By.TAG_NAME, "button")
@@ -261,14 +238,30 @@ def _wait_for_place_page(driver, expected_name: str, timeout: int = 12) -> bool:
     return False
 
 
-def _get_main_panel(driver):
-    try:
-        panels = driver.find_elements(By.CSS_SELECTOR, "div[role='main']")
-        if panels:
-            return panels[0]
-    except Exception:
-        pass
-    return driver
+def _wait_for_authority_link(driver, timeout: int = 6) -> bool:
+    """
+    Aspetta che l'elemento a[data-item-id='authority'] sia presente e abbia un href valido.
+    Restituisce True se trovato, False se timeout.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            els = driver.find_elements(By.CSS_SELECTOR, "a[data-item-id='authority']")
+            if els:
+                href = els[0].get_attribute("href") or ""
+                if href and _is_valid_external_site(href):
+                    return True
+            # Se non c'e' authority link, non aspettare inutilmente
+            # Controlla se il pannello e' gia' stabile (almeno 5 button)
+            panels = driver.find_elements(By.CSS_SELECTOR, "div[role='main']")
+            if panels:
+                btns = panels[0].find_elements(By.TAG_NAME, "button")
+                if len(btns) >= 5:
+                    return False  # Pannello caricato, semplicemente non ha sito web
+        except Exception:
+            pass
+        time.sleep(0.4)
+    return False
 
 
 def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll_times: int = 10):
@@ -374,11 +367,10 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
                 logger.warning(f"Nessun risultato trovato per {keyword} {comune_attuale}")
                 continue
 
-            # Pre-estrai gli URL delle schede PRIMA di navigare via
+            # Pre-estrai URL + nomi dalla lista prima di navigare
             place_urls = []
             for el in result_elements[:max_results]:
                 href = _extract_place_url_from_element(el)
-                # Estrai anche il nome dall'elemento per il dedup
                 name_candidate = ""
                 for ns in ["h3", ".qBF1Pd", ".fontHeadlineSmall", "[jsan*='fontHeadlineSmall']"]:
                     try:
@@ -491,7 +483,8 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
                     except:
                         continue
 
-                main_panel = _get_main_panel(driver)
+                # Aspetta che il link authority (sito web) sia caricato nel DOM
+                _wait_for_authority_link(driver, timeout=6)
 
                 website_selectors = [
                     "a[data-item-id='authority']",
@@ -502,15 +495,17 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
                     "a[aria-label*='website']",
                     "a[href^='http'][data-item-id]",
                 ]
+                # Cerca su driver intero, non su main_panel
                 for selector in website_selectors:
                     try:
-                        web_elements = main_panel.find_elements(By.CSS_SELECTOR, selector)
+                        web_elements = driver.find_elements(By.CSS_SELECTOR, selector)
                         if web_elements:
                             for we in web_elements:
                                 href = we.get_attribute("href") or ""
                                 href = _extract_real_url_if_google_redirect(href)
                                 if _is_valid_external_site(href):
                                     website = href
+                                    logger.info(f"Sito web trovato per {name}: {website}")
                                     break
                                 if not website:
                                     web_text = we.text.strip() or we.get_attribute("aria-label") or ""
