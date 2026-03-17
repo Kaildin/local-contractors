@@ -134,130 +134,29 @@ def _extract_place_url_from_element(element) -> str:
     return ""
 
 
-def _parse_recensioni_number(raw: str) -> int:
-    clean = re.sub(r'[^\d]', '', raw)
-    try:
-        n = int(clean)
-        return n if n > 0 else 0
-    except ValueError:
-        return 0
-
-
 def _extract_num_recensioni(driver) -> int:
     """
-    Strategia 0: clicca il tab Recensioni, legge da div.jANrlb div.fontBodySmall
-                 (approccio semantico: segue l'interazione utente)
-    Strategia 1: span[role='img'][aria-label*='recension'] senza click
-    Strategia 2: span[role='img'][aria-label*='stell'] senza click
-    Strategia 3: body text fallback
-    Se il tab viene cliccato, torna indietro (back) dopo la lettura.
+    Legge il numero di recensioni direttamente dal body text della scheda.
+    Google Maps mostra il testo nella forma "11 recensioni" o "11 reviews".
+    Prende il primo match con numero > 0.
     """
-    current_url = ""
-    tab_clicked = False
-
     try:
-        current_url = driver.current_url
-
-        # --- Strategia 0: click tab Recensioni ---
-        tab_selectors = [
-            "button.hh2c6[aria-label*='Recensioni']",
-            "button.hh2c6[aria-label*='Reviews']",
-            "button[aria-label*='recensioni per']",
-            "button[aria-label*='reviews for']",
-            # fallback: qualsiasi button con testo Recensioni
-            "//button[contains(@aria-label,'ecensioni')]",
-        ]
-        tab_btn = None
-        for sel in tab_selectors:
-            try:
-                if sel.startswith("//"):
-                    els = driver.find_elements(By.XPATH, sel)
-                else:
-                    els = driver.find_elements(By.CSS_SELECTOR, sel)
-                if els:
-                    tab_btn = els[0]
-                    logger.debug(f"[Rec S0] Tab trovato con: {sel}")
-                    break
-            except:
-                continue
-
-        if tab_btn:
-            try:
-                driver.execute_script("arguments[0].click();", tab_btn)
-                tab_clicked = True
-                time.sleep(1.5)
-                # Leggi il conteggio da jANrlb
-                count_els = driver.find_elements(By.CSS_SELECTOR, "div.jANrlb div.fontBodySmall")
-                for cel in count_els:
-                    txt = (cel.text or "").strip()
-                    logger.debug(f"[Rec S0] jANrlb text='{txt}'")
-                    n = _parse_recensioni_number(txt)
-                    if n > 0:
-                        logger.info(f"[Rec S0] recensioni trovate via tab: {n}")
-                        return n
-                # Fallback nel pannello jANrlb: cerca span con numero
-                panel_els = driver.find_elements(By.CSS_SELECTOR, "div.jANrlb")
-                if panel_els:
-                    panel_text = panel_els[0].text
-                    m = re.search(r'([\d][\d\.\,\xa0]*)\s*(?:recensioni?|reviews?)', panel_text, re.IGNORECASE)
-                    if m:
-                        n = _parse_recensioni_number(m.group(1))
-                        if n > 0:
-                            logger.info(f"[Rec S0b] recensioni da jANrlb text: {n}")
-                            return n
-            except Exception as e:
-                logger.debug(f"[Rec S0] Errore click tab: {e}")
-
-        # --- Strategia 1: span[role='img'][aria-label*='recension'] ---
-        els = driver.find_elements(By.CSS_SELECTOR, "span[role='img'][aria-label*='recension']")
-        for el in els:
-            aria = el.get_attribute("aria-label") or ""
-            txt = (el.text or "").strip()
-            logger.debug(f"[Rec S1] aria='{aria}' text='{txt}'")
-            m = re.search(r"([\d][\d\.,\xa0]*)\s+recension", aria, re.IGNORECASE)
-            if m:
-                n = _parse_recensioni_number(m.group(1))
+        body_text = driver.find_element(By.TAG_NAME, "body").text
+        # Cerca tutte le occorrenze "N recensioni" / "N reviews" nel body
+        matches = re.findall(
+            r'([\d][\d\.\,\s]*?)\s+(?:recensioni?|reviews?)',
+            body_text,
+            re.IGNORECASE
+        )
+        for raw in matches:
+            clean = re.sub(r'[^\d]', '', raw)
+            if clean:
+                n = int(clean)
                 if n > 0:
+                    logger.info(f"[Rec] trovate {n} recensioni dal body text")
                     return n
-            m2 = re.search(r"\(([\d][\d\.,\xa0]*)\)", txt)
-            if m2:
-                n = _parse_recensioni_number(m2.group(1))
-                if n > 0:
-                    return n
-
-        # --- Strategia 2: span[role='img'][aria-label*='stell'] ---
-        els2 = driver.find_elements(By.CSS_SELECTOR, "span[role='img'][aria-label*='stell']")
-        for el in els2:
-            aria = el.get_attribute("aria-label") or ""
-            m = re.search(r"([\d][\d\.,\xa0]*)\s+recension", aria, re.IGNORECASE)
-            if m:
-                n = _parse_recensioni_number(m.group(1))
-                if n > 0:
-                    return n
-
-        # --- Strategia 3: body text ---
-        page_text = driver.find_element(By.TAG_NAME, "body").text
-        m = re.search(r"([\d][\d\.,\xa0]*)\s+(?:recensioni?|reviews?)", page_text, re.IGNORECASE)
-        if m:
-            n = _parse_recensioni_number(m.group(1))
-            if n > 0:
-                return n
-
     except Exception as e:
-        logger.debug(f"Errore lettura recensioni: {e}")
-    finally:
-        # Se abbiamo cliccato il tab, torniamo alla scheda principale
-        if tab_clicked and current_url:
-            try:
-                driver.back()
-                time.sleep(1.0)
-            except Exception:
-                try:
-                    driver.get(current_url)
-                    time.sleep(1.0)
-                except Exception:
-                    pass
-
+        logger.debug(f"[Rec] Errore lettura body: {e}")
     return 0
 
 
