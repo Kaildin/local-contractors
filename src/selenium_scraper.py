@@ -2,6 +2,8 @@ import logging
 import time
 import random
 import re
+import os
+import datetime
 from urllib.parse import urlparse, parse_qs
 
 from selenium import webdriver
@@ -14,6 +16,42 @@ from .driver_utils import init_driver
 from .text_utils import clean_extracted_text
 
 logger = logging.getLogger(__name__)
+
+
+def _safe_filename(s: str, max_len: int = 80) -> str:
+    s = (s or "").strip().lower()
+    s = re.sub(r"\s+", "_", s)
+    s = re.sub(r"[^a-z0-9_\-]+", "", s)
+    s = s.strip("_-")
+    if not s:
+        s = "place"
+    return s[:max_len]
+
+
+def _save_maps_screenshot(driver, *, comune: str, keyword: str, place_name: str, idx: int) -> str:
+    """
+    Salva uno screenshot della pagina Google Maps "place" appena caricata.
+    Ritorna il path del file creato (stringa) oppure "" se fallisce.
+    """
+    try:
+        out_dir = os.environ.get("MAPS_SCREENSHOTS_DIR") or os.path.join("debug", "maps_screenshots")
+        os.makedirs(out_dir, exist_ok=True)
+
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        slug = _safe_filename(place_name)
+        comune_slug = _safe_filename(comune)
+        keyword_slug = _safe_filename(keyword)
+        filename = f"{ts}_{idx:03d}_{comune_slug}_{keyword_slug}_{slug}.png"
+        path = os.path.join(out_dir, filename)
+
+        # Piccola attesa per stabilizzare il rendering (utile in headless)
+        time.sleep(0.4)
+        ok = driver.save_screenshot(path)
+        if ok:
+            return path
+    except Exception as e:
+        logger.debug(f"[Screenshot] Errore salvataggio: {e}")
+    return ""
 
 
 def _looks_like_google_status_block(s: str) -> bool:
@@ -386,6 +424,17 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
                 if not panel_ready:
                     logger.warning(f"[Skip] Scheda non caricata per '{name}', salto.")
                     continue
+
+                WebDriverWait(driver, 2).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
+                screenshot_path = _save_maps_screenshot(
+                    driver,
+                    comune=comune_attuale,
+                    keyword=keyword,
+                    place_name=name,
+                    idx=i + 1,
+                )
+                if screenshot_path:
+                    logger.info(f"[Screenshot] Salvato: {screenshot_path}")
 
                 maps_url = driver.current_url
                 num_recensioni = _extract_num_recensioni(driver)
