@@ -2,9 +2,11 @@ import logging
 import time
 import random
 import re
+
 import os
 import datetime
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, quote_plus
+
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -174,13 +176,35 @@ def _extract_place_url_from_element(element) -> str:
 
 def _extract_num_recensioni(driver) -> int:
     """
-    Legge il numero di recensioni direttamente dal body text della scheda.
-    Google Maps mostra il testo nella forma "11 recensioni" o "11 reviews".
-    Prende il primo match con numero > 0.
+    Legge il numero di recensioni dalla scheda Google Maps.
+    Strategia 1: aria-label su span/button del blocco stelle (robusto anche
+    con limited view, perche' l'attributo e' presente anche quando il testo
+    non viene renderizzato nel body).
+    Strategia 2: fallback su body.text con regex.
     """
+    # Strategia 1: aria-label
+    try:
+        for sel in [
+            "span[aria-label*='recension']",
+            "span[aria-label*='review']",
+            "button[aria-label*='recension']",
+            "button[aria-label*='review']",
+        ]:
+            els = driver.find_elements(By.CSS_SELECTOR, sel)
+            for el in els:
+                label = el.get_attribute("aria-label") or ""
+                m = re.search(r'([\d][\d\.,]*)', label)
+                if m:
+                    n = int(re.sub(r'[^\d]', '', m.group(1)))
+                    if n > 0:
+                        logger.info(f"[Rec] trovate {n} recensioni da aria-label")
+                        return n
+    except Exception as e:
+        logger.debug(f"[Rec] Metodo aria-label fallito: {e}")
+
+    # Strategia 2: body text (fallback)
     try:
         body_text = driver.find_element(By.TAG_NAME, "body").text
-        # Cerca tutte le occorrenze "N recensioni" / "N reviews" nel body
         matches = re.findall(
             r'([\d][\d\.\,\s]*?)\s+(?:recensioni?|reviews?)',
             body_text,
@@ -267,6 +291,43 @@ def _wait_for_authority_link(driver, timeout: int = 6) -> bool:
             pass
         time.sleep(0.4)
     return False
+
+
+def _navigate_to_place(driver, name: str, place_href: str):
+    """
+    Naviga alla scheda Google Maps bypassando la 'limited view' per utenti
+    non loggati (introdotta da Google a feb 2026).
+
+    Strategia:
+    1. Warmup su google.com per stabilire cookie di sessione
+    2. Navigazione via maps/search (evita il gate limited view)
+    3. Fallback su URL diretto se la search non apre la scheda place
+    """
+    # Step 1: warmup
+    try:
+        driver.get("https://www.google.com")
+        time.sleep(2)
+    except Exception as e:
+        logger.debug(f"[Nav] Warmup fallito: {e}")
+
+    # Step 2: search-based navigation
+    name_encoded = quote_plus(name)
+    search_url = f"https://www.google.com/maps/search/{name_encoded}/"
+    logger.info(f"[Nav] Navigazione via search: {search_url}")
+    try:
+        driver.get(search_url)
+        time.sleep(5)
+    except Exception as e:
+        logger.warning(f"[Nav] Search navigation fallita: {e}")
+
+    # Step 3: fallback diretto se non siamo su una scheda place
+    if "/maps/place/" not in driver.current_url:
+        logger.info("[Nav] Search non ha aperto scheda place, fallback diretto")
+        try:
+            driver.get(place_href)
+        except Exception as e:
+            logger.error(f"[Nav] Fallback diretto fallito: {e}")
+            raise
 
 
 def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll_times: int = 10):
@@ -413,9 +474,9 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
                     logger.warning(f"URL scheda non trovato per '{name}', salto.")
                     continue
 
-                logger.info(f"Navigazione diretta alla scheda: {name}")
+                logger.info(f"Navigazione scheda con bypass limited view: {name}")
                 try:
-                    driver.get(place_href)
+                    _navigate_to_place(driver, name, place_href)
                 except Exception as e_nav:
                     logger.error(f"Errore navigazione scheda '{name}': {e_nav}")
                     continue
@@ -437,6 +498,16 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
                     logger.info(f"[Screenshot] Salvato: {screenshot_path}")
 
                 maps_url = driver.current_url
+
+                # Attesa esplicita elemento recensioni prima di estrarre
+                try:
+                    WebDriverWait(driver, 8).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR,
+                            "span[aria-label*='recension'], span[aria-label*='review']"))
+                    )
+                except Exception:
+                    pass
+
                 num_recensioni = _extract_num_recensioni(driver)
                 logger.info(f"Recensioni rilevate per {name}: {num_recensioni}")
 
