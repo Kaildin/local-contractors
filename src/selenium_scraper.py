@@ -296,38 +296,143 @@ def _wait_for_authority_link(driver, timeout: int = 6) -> bool:
 def _navigate_to_place(driver, name: str, place_href: str):
     """
     Naviga alla scheda Google Maps bypassando la 'limited view' per utenti
-    non loggati (introdotta da Google a feb 2026).
+    non loggati.
 
     Strategia:
-    1. Warmup su google.com per stabilire cookie di sessione
-    2. Navigazione via maps/search (evita il gate limited view)
-    3. Fallback su URL diretto se la search non apre la scheda place
+    1. Warmup su google.com
+    2. Apertura via maps/search
+    3. Click di un risultato dentro Maps per entrare nella scheda place
+    4. Fallback diretto solo come ultimissima risorsa
     """
-    # Step 1: warmup
+    try:
+        os.makedirs("debug", exist_ok=True)
+    except Exception:
+        pass
+
+    def _debug_shot(label: str):
+        try:
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            path = os.path.join("debug", f"{ts}_{label}.png")
+            driver.save_screenshot(path)
+            logger.info(f"[Debug] Screenshot salvato: {path}")
+        except Exception as e:
+            logger.debug(f"[Debug] Screenshot fallito ({label}): {e}")
+
+    def _has_review_signals() -> bool:
+        review_selectors = [
+            "span[aria-label*='recension']",
+            "span[aria-label*='review']",
+            "button[aria-label*='recension']",
+            "button[aria-label*='review']",
+            "[data-tab-index='1']",
+            "div[role='tab']",
+        ]
+        for sel in review_selectors:
+            try:
+                els = driver.find_elements(By.CSS_SELECTOR, sel)
+                visible = [e for e in els if e.is_displayed()]
+                if visible:
+                    logger.info(f"[Nav] Segnale recensioni trovato con selector: {sel}")
+                    return True
+            except Exception:
+                continue
+        return False
+
+    def _click_first_place_result() -> bool:
+        selectors = [
+            "a[href*='/maps/place/']",
+            "div[role='feed'] a[href*='/maps/place/']",
+            "div[role='article'] a[href*='/maps/place/']",
+            "div.Nv2PK a[href*='/maps/place/']",
+        ]
+
+        for sel in selectors:
+            try:
+                elements = driver.find_elements(By.CSS_SELECTOR, sel)
+                logger.info(f"[Nav] Trovati {len(elements)} candidati con {sel}")
+                for idx, el in enumerate(elements[:5]):
+                    try:
+                        href = el.get_attribute("href") or ""
+                        if "/maps/place/" not in href:
+                            continue
+
+                        driver.execute_script(
+                            "arguments[0].scrollIntoView({block:'center'});", el
+                        )
+                        time.sleep(0.8)
+                        driver.execute_script("arguments[0].click();", el)
+                        logger.info(f"[Nav] Click risultato #{idx+1} con href: {href}")
+                        time.sleep(4)
+
+                        if "/maps/place/" in driver.current_url:
+                            return True
+                    except Exception as e:
+                        logger.debug(f"[Nav] Click candidato fallito: {e}")
+                        continue
+            except Exception as e:
+                logger.debug(f"[Nav] Selector fallito {sel}: {e}")
+                continue
+
+        return False
+
+    # 1) Warmup
     try:
         driver.get("https://www.google.com")
         time.sleep(2)
+        logger.info("[Nav] Warmup completato")
+        _debug_shot("01_after_warmup")
     except Exception as e:
         logger.debug(f"[Nav] Warmup fallito: {e}")
 
-    # Step 2: search-based navigation
+    # 2) Search navigation
     name_encoded = quote_plus(name)
     search_url = f"https://www.google.com/maps/search/{name_encoded}/"
     logger.info(f"[Nav] Navigazione via search: {search_url}")
     try:
         driver.get(search_url)
         time.sleep(5)
+        logger.info(f"[Nav] URL dopo search: {driver.current_url}")
+        _debug_shot("02_after_search")
     except Exception as e:
         logger.warning(f"[Nav] Search navigation fallita: {e}")
 
-    # Step 3: fallback diretto se non siamo su una scheda place
+    # 3) Se siamo già su una place page e vediamo segnali utili, bene così
+    if "/maps/place/" in driver.current_url and _has_review_signals():
+        logger.info("[Nav] Place page valida già ottenuta via search")
+        return
+
+    # 4) Se siamo nella search/lista, clicca un risultato interno a Maps
     if "/maps/place/" not in driver.current_url:
-        logger.info("[Nav] Search non ha aperto scheda place, fallback diretto")
-        try:
-            driver.get(place_href)
-        except Exception as e:
-            logger.error(f"[Nav] Fallback diretto fallito: {e}")
-            raise
+        logger.info("[Nav] Non siamo su una scheda place, provo click da lista risultati")
+        clicked = _click_first_place_result()
+        logger.info(f"[Nav] Esito click da lista: {clicked}")
+        logger.info(f"[Nav] URL dopo click lista: {driver.current_url}")
+        _debug_shot("03_after_list_click")
+
+        if "/maps/place/" in driver.current_url and _has_review_signals():
+            logger.info("[Nav] Scheda place ottenuta cliccando dalla lista")
+            return
+
+    # 5) Se siamo su place ma ancora senza segnali recensioni, attendi un attimo
+    if "/maps/place/" in driver.current_url:
+        logger.info("[Nav] Siamo su place page, attendo eventuale rendering tardivo")
+        for _ in range(6):
+            if _has_review_signals():
+                logger.info("[Nav] Segnali recensioni comparsi dopo attesa")
+                _debug_shot("04_place_with_reviews")
+                return
+            time.sleep(1)
+
+    # 6) Fallback diretto solo come ultimissima risorsa
+    logger.info("[Nav] Fallback finale su URL diretto")
+    try:
+        driver.get(place_href)
+        time.sleep(4)
+        logger.info(f"[Nav] URL dopo fallback diretto: {driver.current_url}")
+        _debug_shot("05_after_direct_fallback")
+    except Exception as e:
+        logger.error(f"[Nav] Fallback diretto fallito: {e}")
+        raise
 
 
 def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll_times: int = 10):
