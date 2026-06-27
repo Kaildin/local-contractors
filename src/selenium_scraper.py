@@ -60,7 +60,7 @@ def _looks_like_google_status_block(s: str) -> bool:
     s2 = (s or "").strip().lower()
     if not s2:
         return True
-    bad_tokens = ["chiuso", "apre", "stelle", "recension", "valutaz", "·", "ore", "orari"]
+    bad_tokens = ["chiuso", "apre", "stelle", "recension", "valutaz", "\u00b7", "ore", "orari"]
     return any(t in s2 for t in bad_tokens)
 
 
@@ -109,7 +109,7 @@ def sanitize_address(addr: str) -> str:
         return ""
     a = addr.strip()
     low = a.lower()
-    if any(t in low for t in ["chiuso", "apre", "stelle", "recension", "·"]):
+    if any(t in low for t in ["chiuso", "apre", "stelle", "recension", "\u00b7"]):
         has_cap = any(tok.isdigit() and len(tok) == 5 for tok in a.split())
         return a if has_cap else ""
     return a
@@ -177,12 +177,62 @@ def _extract_place_url_from_element(element) -> str:
 def _extract_num_recensioni(driver) -> int:
     """
     Legge il numero di recensioni dalla scheda Google Maps.
+
+    Strategia 0: JSON embedded nel page_source -- Google inietta i dati
+    della scheda come array JavaScript. Robusto anche in limited view
+    perche' i dati sono nel sorgente anche quando il DOM non li renderizza.
+
     Strategia 1: aria-label su span/button del blocco stelle (robusto anche
     con limited view, perche' l'attributo e' presente anche quando il testo
     non viene renderizzato nel body).
+
+    Strategia 1b: selettori CSS specifici 2025/2026 per il blocco rating
+    visibile nella scheda place (div.F7nice, span.UY7F9, ecc.).
+
     Strategia 2: fallback su body.text con regex.
     """
-    # Strategia 1: aria-label
+
+    # ------------------------------------------------------------------ #
+    # Strategia 0: JSON embedded nel page_source                          #
+    # Google Maps inietta i dati come array JS nel sorgente della pagina. #
+    # Il numero di recensioni appare in pattern tipo:                     #
+    #   "1.234 recensioni" oppure stella float vicino a int recensioni.   #
+    # Questo funziona anche quando il DOM e' in limited view.             #
+    # ------------------------------------------------------------------ #
+    try:
+        body_src = driver.page_source
+
+        # Pattern A: testo "X recensioni" o "X reviews" nel sorgente
+        m = re.search(
+            r'([0-9][0-9\.\,\s]{0,9})\\n?(?:&nbsp;)?(?:recensioni?|reviews?)',
+            body_src, re.IGNORECASE
+        )
+        if m:
+            n = int(re.sub(r'[^\d]', '', m.group(1)))
+            if 0 < n < 500000:
+                logger.info(f"[Rec] trovate {n} da JSON embedded (pattern A)")
+                return n
+
+        # Pattern B: coppia (rating_float, n_recensioni) nel JSON array
+        # Cerca un numero float tipo 4.5 o 3.8 seguito a breve da un intero
+        rating_positions = [m.start() for m in re.finditer(
+            r'[,\[]\s*[1-5]\.[0-9]\s*,', body_src
+        )]
+        for rpos in rating_positions:
+            window = body_src[rpos:rpos + 200]
+            m2 = re.search(r'[,\[]\s*([1-9]\d{1,5})\s*[,\]]', window)
+            if m2:
+                n = int(m2.group(1))
+                if 0 < n < 200000:
+                    logger.info(f"[Rec] trovate {n} da JSON embedded (pattern B)")
+                    return n
+
+    except Exception as e:
+        logger.debug(f"[Rec] Strategia 0 fallita: {e}")
+
+    # ------------------------------------------------------------------ #
+    # Strategia 1: aria-label                                             #
+    # ------------------------------------------------------------------ #
     try:
         for sel in [
             "span[aria-label*='recension']",
@@ -202,7 +252,49 @@ def _extract_num_recensioni(driver) -> int:
     except Exception as e:
         logger.debug(f"[Rec] Metodo aria-label fallito: {e}")
 
-    # Strategia 2: body text (fallback)
+    # ------------------------------------------------------------------ #
+    # Strategia 1b: selettori CSS 2025/2026 blocco rating                 #
+    # div.F7nice contiene testo tipo "4,5(1.234)" o "4,5\n1.234"          #
+    # ------------------------------------------------------------------ #
+    try:
+        for sel in [
+            "div.F7nice",
+            "span.UY7F9",
+            "div.UaQhfb span",
+            "div.fontBodyMedium span.UY7F9",
+            "button.DkEaL",
+            "div[jsaction*='pane.rating']",
+        ]:
+            try:
+                els = driver.find_elements(By.CSS_SELECTOR, sel)
+                for el in els:
+                    txt = (el.text or "").strip()
+                    if not txt:
+                        continue
+                    # Formato "4,5(1.234)" -- numero tra parentesi
+                    m = re.search(r'\(([0-9][0-9\.\,]*)\)', txt)
+                    if m:
+                        n = int(re.sub(r'[^\d]', '', m.group(1)))
+                        if n > 0:
+                            logger.info(f"[Rec] trovate {n} da {sel} (parentesi)")
+                            return n
+                    # Formato "1.234 recensioni" nel testo dell'elemento
+                    m2 = re.search(r'([0-9][0-9\.\,]*)\s*recensioni?', txt, re.IGNORECASE)
+                    if not m2:
+                        m2 = re.search(r'([0-9][0-9\.\,]*)\s*reviews?', txt, re.IGNORECASE)
+                    if m2:
+                        n = int(re.sub(r'[^\d]', '', m2.group(1)))
+                        if n > 0:
+                            logger.info(f"[Rec] trovate {n} da {sel} (testo)")
+                            return n
+            except Exception:
+                continue
+    except Exception as e:
+        logger.debug(f"[Rec] Strategia 1b fallita: {e}")
+
+    # ------------------------------------------------------------------ #
+    # Strategia 2: body text (fallback finale)                            #
+    # ------------------------------------------------------------------ #
     try:
         body_text = driver.find_element(By.TAG_NAME, "body").text
         matches = re.findall(
@@ -300,7 +392,7 @@ def _navigate_to_place(driver, name: str, place_href: str):
 
     Strategia:
     1. Warmup su google.com
-    2. Apertura via maps/search
+    2. Apertura via maps/search con parametri anti-limited-view
     3. Click di un risultato dentro Maps per entrare nella scheda place
     4. Fallback diretto solo come ultimissima risorsa
     """
@@ -326,6 +418,10 @@ def _navigate_to_place(driver, name: str, place_href: str):
             "button[aria-label*='review']",
             "[data-tab-index='1']",
             "div[role='tab']",
+            # Selettori 2025/2026 presenti nella scheda place completa
+            "div.F7nice",    # blocco stelle + conteggio recensioni
+            "span.ceNzKf",   # stelle singole nel blocco rating
+            "div.UaQhfb",    # panel info principale della scheda
         ]
         for sel in review_selectors:
             try:
@@ -384,9 +480,15 @@ def _navigate_to_place(driver, name: str, place_href: str):
     except Exception as e:
         logger.debug(f"[Nav] Warmup fallito: {e}")
 
-    # 2) Search navigation
+    # 2) Search navigation con parametri anti-limited-view
+    # hl=it  -> lingua italiana
+    # gl=IT  -> paese Italia
+    # authuser=0 -> forza sessione non autenticata, evita redirect login
     name_encoded = quote_plus(name)
-    search_url = f"https://www.google.com/maps/search/{name_encoded}/"
+    search_url = (
+        f"https://www.google.com/maps/search/{name_encoded}"
+        f"/?hl=it&gl=IT&authuser=0"
+    )
     logger.info(f"[Nav] Navigazione via search: {search_url}")
     try:
         driver.get(search_url)
@@ -396,9 +498,9 @@ def _navigate_to_place(driver, name: str, place_href: str):
     except Exception as e:
         logger.warning(f"[Nav] Search navigation fallita: {e}")
 
-    # 3) Se siamo già su una place page e vediamo segnali utili, bene così
+    # 3) Se siamo gia' su una place page e vediamo segnali utili, bene cosi'
     if "/maps/place/" in driver.current_url and _has_review_signals():
-        logger.info("[Nav] Place page valida già ottenuta via search")
+        logger.info("[Nav] Place page valida gia' ottenuta via search")
         return
 
     # 4) Se siamo nella search/lista, clicca un risultato interno a Maps
@@ -413,7 +515,7 @@ def _navigate_to_place(driver, name: str, place_href: str):
             logger.info("[Nav] Scheda place ottenuta cliccando dalla lista")
             return
 
-    # 5) Se siamo su place ma ancora senza segnali recensioni, attendi un attimo
+    # 5) Se siamo su place ma ancora senza segnali recensioni, attendi
     if "/maps/place/" in driver.current_url:
         logger.info("[Nav] Siamo su place page, attendo eventuale rendering tardivo")
         for _ in range(6):
@@ -605,10 +707,13 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
                 maps_url = driver.current_url
 
                 # Attesa esplicita elemento recensioni prima di estrarre
+                # Aggiunto div.F7nice come alternativa ai selector aria-label
                 try:
                     WebDriverWait(driver, 8).until(
                         EC.presence_of_element_located((By.CSS_SELECTOR,
-                            "span[aria-label*='recension'], span[aria-label*='review']"))
+                            "span[aria-label*='recension'], "
+                            "span[aria-label*='review'], "
+                            "div.F7nice"))
                     )
                 except Exception:
                     pass
