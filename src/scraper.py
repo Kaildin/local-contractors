@@ -11,7 +11,7 @@ from .driver_utils import cleanup_chrome_tmp
 logger = logging.getLogger(__name__)
 
 CSV_FIELDNAMES = [
-    "comune", "keyword", "nome", "indirizzo", "telefono",
+    "city", "state", "keyword", "nome", "indirizzo", "telefono",
     "sito_web", "ha_sito_web", "num_recensioni", "maps_url",
 ]
 
@@ -26,10 +26,11 @@ def _load_already_scraped(output_csv: str) -> set:
             reader = csv.DictReader(f)
             for row in reader:
                 nome = (row.get("nome") or "").strip().lower()
-                comune = (row.get("comune") or "").strip().lower()
+                # Supporta sia colonna 'city' (US) che 'comune' (IT legacy)
+                city = (row.get("city") or row.get("comune") or "").strip().lower()
                 if nome:
-                    seen.add((nome, comune))
-        logger.info(f"[Resume] CSV esistente: {len(seen)} lead già presenti, verranno saltati.")
+                    seen.add((nome, city))
+        logger.info(f"[Resume] CSV esistente: {len(seen)} lead gia' presenti, verranno saltati.")
     except Exception as e:
         logger.warning(f"[Resume] Errore lettura CSV esistente: {e}")
     return seen
@@ -49,15 +50,31 @@ def _append_lead_to_csv(output_csv: str, row: Dict[str, Any]):
         logger.error(f"[Salvataggio incrementale] Errore: {e}")
 
 
-def build_search_urls(comuni: List[str], keywords: List[str]) -> List[Dict[str, str]]:
+def build_search_urls(
+    cities: List[str],
+    keywords: List[str],
+    lang: str = "en",
+    state: str = "",
+) -> List[Dict[str, str]]:
+    """
+    Costruisce le URL di ricerca Google Maps.
+    - lang="en" -> hl=en (US)
+    - lang="it" -> hl=it (IT)
+    - state: aggiunto alla query solo per US (es. "plumber Austin TX")
+    """
     search_urls = []
-    for comune in comuni:
+    for city in cities:
         for keyword in keywords:
-            query = f"{keyword} {comune}".replace(" ", "+")
+            # Per US aggiunge lo stato alla query per disambiguare
+            # (es. "Springfield" esiste in 30 stati)
+            if state:
+                query = f"{keyword} {city} {state}".replace(" ", "+")
+            else:
+                query = f"{keyword} {city}".replace(" ", "+")
             search_urls.append({
-                "comune": comune,
+                "comune": city,   # chiave 'comune' mantenuta per compatibilita' interna
                 "keyword": keyword,
-                "url": f"https://www.google.com/maps/search/{query}?hl=it",
+                "url": f"https://www.google.com/maps/search/{query}?hl={lang}&gl={'US' if lang == 'en' else 'IT'}",
             })
     return search_urls
 
@@ -72,6 +89,8 @@ def search_contractors(
     scroll_times: int = 10,
     max_results: int = 20,
     output_csv: Optional[str] = None,
+    lang: str = "en",
+    state: str = "",
 ) -> List[Dict[str, Any]]:
     """
     Wrapper principale: costruisce gli URL, lancia scrape_with_selenium,
@@ -83,7 +102,7 @@ def search_contractors(
     if output_csv:
         already_seen = _load_already_scraped(output_csv)
 
-    search_urls = build_search_urls([comune], keywords)
+    search_urls = build_search_urls([comune], keywords, lang=lang, state=state)
 
     results_raw, driver = scrape_with_selenium(
         search_urls,
@@ -102,15 +121,15 @@ def search_contractors(
     filtered = []
     for r in results_raw:
         nome = (r.get("nome") or "").strip()
-        comune_r = (r.get("comune") or "").strip()
+        city_r = (r.get("comune") or "").strip()
 
-        # --- Deduplicazione: salta se già nel CSV ---
-        key = (nome.lower(), comune_r.lower())
+        # --- Deduplicazione: salta se gia' nel CSV ---
+        key = (nome.lower(), city_r.lower())
         if key in already_seen:
-            logger.info(f"[Resume] Già presente, saltato: {nome}")
+            logger.info(f"[Resume] Gia' presente, saltato: {nome}")
             continue
 
-        # --- Filtro recensioni (unico filtro rimasto) ---
+        # --- Filtro recensioni ---
         n = r.get("num_recensioni") or 0
         try:
             n = int(n)
@@ -120,13 +139,22 @@ def search_contractors(
             logger.info(f"[Filter] Scartato '{nome}' - recensioni fuori range: {n}")
             continue
 
-        # --- Classifica sito web: ha_sito_web per filtrare in post ---
+        # --- Classifica sito web ---
         website = (r.get("sito_web") or "").strip()
         ha_sito = website_is_real(website, check_alive=check_website_alive) if website else False
         r["ha_sito_web"] = ha_sito
 
+        # Mappa colonne per CSV US
+        r["city"] = city_r
+        r["state"] = state or ""
+
         if not r.get("maps_url"):
-            r["maps_url"] = f"https://www.google.com/maps/search/{nome.replace(' ', '+')}+{comune_r}?hl=it"
+            suffix = f"+{state}" if state else ""
+            r["maps_url"] = (
+                f"https://www.google.com/maps/search/"
+                f"{nome.replace(' ', '+')}+{city_r.replace(' ', '+')}{suffix}"
+                f"?hl={lang}"
+            )
 
         filtered.append(r)
         already_seen.add(key)

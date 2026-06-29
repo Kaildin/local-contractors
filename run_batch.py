@@ -24,53 +24,82 @@ def build_keywords(selected_labels):
     return keywords
 
 
-def get_max_results(popolazione: int) -> int:
-    """Adatta max_results alla dimensione del comune."""
-    if popolazione < 5_000:
-        return 10
-    elif popolazione < 20_000:
-        return 20
-    elif popolazione < 100_000:
-        return 30
-    else:
-        return 50
+def get_max_results(popolazione: int, lang: str = "en") -> int:
+    """
+    Adatta max_results alla dimensione della citta'.
+    Per il mercato US le soglie di popolazione sono piu' alte.
+    Google Maps non mostra piu' di ~20 risultati per query nella
+    lista laterale, quindi 50 e' il massimo utile in ogni caso.
+    """
+    if lang == "en":  # US
+        if popolazione < 50_000:
+            return 20
+        elif popolazione < 250_000:
+            return 30
+        elif popolazione < 1_000_000:
+            return 40
+        else:
+            return 50
+    else:  # IT
+        if popolazione < 5_000:
+            return 10
+        elif popolazione < 20_000:
+            return 20
+        elif popolazione < 100_000:
+            return 30
+        else:
+            return 50
 
 
-def load_comuni(csv_path: str, provincia_filter: str = None):
+def load_cities(csv_path: str, state_filter: str = None, lang: str = "en"):
     """
-    Legge il CSV dei comuni.
-    Colonne attese: comune, provincia, popolazione
+    Legge il CSV delle citta'.
+
+    Modalita' US  -> colonne attese: city, state, population
+    Modalita' IT  -> colonne attese: comune, provincia, popolazione
     """
-    comuni = []
+    cities = []
     with open(csv_path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
         for row in reader:
-            comune = (row.get("comune") or "").strip()
-            provincia = (row.get("provincia") or "").strip()
-            try:
-                popolazione = int((row.get("popolazione") or "0").replace(".", "").replace(",", ""))
-            except ValueError:
-                popolazione = 0
+            if lang == "en":
+                city = (row.get("city") or "").strip()
+                state = (row.get("state") or "").strip()
+                try:
+                    pop = int(
+                        (row.get("population") or "0")
+                        .replace(".", "").replace(",", "")
+                    )
+                except ValueError:
+                    pop = 0
+            else:
+                city = (row.get("comune") or "").strip()
+                state = (row.get("provincia") or "").strip()
+                try:
+                    pop = int(
+                        (row.get("popolazione") or "0")
+                        .replace(".", "").replace(",", "")
+                    )
+                except ValueError:
+                    pop = 0
 
-            if not comune:
+            if not city:
                 continue
-            if provincia_filter and provincia.lower() != provincia_filter.lower():
+            if state_filter and state.lower() != state_filter.lower():
                 continue
 
-            comuni.append({
-                "comune": comune,
-                "provincia": provincia,
-                "popolazione": popolazione,
+            cities.append({
+                "city": city,
+                "state": state,
+                "population": pop,
             })
-    return comuni
+    return cities
 
 
-def get_already_completed_comuni(output_csv: str) -> set:
+def get_already_completed(output_csv: str) -> set:
     """
     Legge il CSV output esistente e restituisce il set di
-    (comune.lower, keyword.lower) gia' completati.
-    Usato per il resume: se un comune e' gia' stato scrapato
-    per TUTTE le keyword della nicchia, viene saltato.
+    (city.lower, keyword.lower) gia' completati (resume).
     """
     done = set()
     path = Path(output_csv)
@@ -80,11 +109,13 @@ def get_already_completed_comuni(output_csv: str) -> set:
         with open(path, newline="", encoding="utf-8") as f:
             reader = csv.DictReader(f)
             for row in reader:
-                comune = (row.get("comune") or "").strip().lower()
+                city = (
+                    row.get("city") or row.get("comune") or ""
+                ).strip().lower()
                 keyword = (row.get("keyword") or "").strip().lower()
-                if comune and keyword:
-                    done.add((comune, keyword))
-        logger.info(f"[Resume] {len(done)} (comune, keyword) gia' presenti nel CSV.")
+                if city and keyword:
+                    done.add((city, keyword))
+        logger.info(f"[Resume] {len(done)} (city, keyword) gia' presenti nel CSV.")
     except Exception as e:
         logger.warning(f"[Resume] Errore lettura CSV esistente: {e}")
     return done
@@ -92,22 +123,30 @@ def get_already_completed_comuni(output_csv: str) -> set:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Batch scraper: itera su tutti i comuni di un CSV input."
+        description="Batch scraper: itera su tutte le citta' di un CSV input."
     )
     parser.add_argument(
         "--input", required=True,
-        help="Path al CSV con colonne: comune, provincia, popolazione"
+        help=(
+            "Path al CSV. "
+            "US: colonne city, state, population | "
+            "IT: colonne comune, provincia, popolazione"
+        )
     )
     parser.add_argument(
         "--nicchie", nargs="+", required=True,
-        help="Una o piu' nicchie (es. \"Imbianchino / Pittore edile\")"
+        help="Una o piu' nicchie (es. \"Plumber\" \"Dog Groomer\")"
     )
     parser.add_argument(
-        "--provincia", default=None,
-        help="Filtra per provincia (es. Roma). Se omesso, scrapa tutto il CSV."
+        "--lang", default="en", choices=["en", "it"],
+        help="Lingua/mercato: en = US (default), it = Italia"
+    )
+    parser.add_argument(
+        "--state", default=None,
+        help="Filtra per stato/provincia (es. TX, California). Se omesso scrapa tutto il CSV."
     )
     parser.add_argument("--min-reviews", type=int, default=1)
-    parser.add_argument("--max-reviews", type=int, default=15)
+    parser.add_argument("--max-reviews", type=int, default=100)
     parser.add_argument("--scroll-times", type=int, default=10)
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--no-http-check", action="store_true")
@@ -117,11 +156,11 @@ def main():
     )
     parser.add_argument(
         "--pause-min", type=float, default=5.0,
-        help="Pausa minima in secondi tra un comune e l'altro (anti-ban)"
+        help="Pausa minima in secondi tra una citta' e l'altra (anti-ban)"
     )
     parser.add_argument(
         "--pause-max", type=float, default=15.0,
-        help="Pausa massima in secondi tra un comune e l'altro (anti-ban)"
+        help="Pausa massima in secondi tra una citta' e l'altra (anti-ban)"
     )
     parser.add_argument(
         "--log-level", default="INFO",
@@ -142,51 +181,52 @@ def main():
             + "\n".join(f"  - {n[0]}" for n in NICHES)
         )
 
-    # Carica comuni
-    comuni_list = load_comuni(args.input, provincia_filter=args.provincia)
-    if not comuni_list:
-        raise SystemExit("Nessun comune trovato nel CSV con i filtri specificati.")
+    # Carica citta'
+    cities_list = load_cities(args.input, state_filter=args.state, lang=args.lang)
+    if not cities_list:
+        raise SystemExit("Nessuna citta' trovata nel CSV con i filtri specificati.")
 
     out_path = args.output
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)
 
-    # Resume: carica (comune, keyword) gia' presenti
-    done_pairs = get_already_completed_comuni(out_path)
+    done_pairs = get_already_completed(out_path)
 
-    total = len(comuni_list)
+    total = len(cities_list)
     print(f"\n{'='*60}")
     print(f"BATCH SCRAPING")
-    print(f"  Comuni da processare : {total}")
-    print(f"  Nicchie              : {args.nicchie}")
-    print(f"  Keywords             : {keywords}")
-    print(f"  Provincia filtro     : {args.provincia or 'tutte'}")
-    print(f"  Output CSV           : {out_path}")
-    print(f"  Headless             : {args.headless}")
-    print(f"  Pausa tra comuni     : {args.pause_min}-{args.pause_max}s")
+    print(f"  Citta' da processare  : {total}")
+    print(f"  Nicchie               : {args.nicchie}")
+    print(f"  Keywords              : {keywords}")
+    print(f"  Lingua/mercato        : {args.lang.upper()}")
+    print(f"  Filtro stato/prov.    : {args.state or 'tutti'}")
+    print(f"  Output CSV            : {out_path}")
+    print(f"  Headless              : {args.headless}")
+    print(f"  Pausa tra citta'      : {args.pause_min}-{args.pause_max}s")
     print(f"{'='*60}\n")
 
     total_leads = 0
 
-    for idx, entry in enumerate(comuni_list, 1):
-        comune = entry["comune"]
-        popolazione = entry["popolazione"]
-        max_results = get_max_results(popolazione)
+    for idx, entry in enumerate(cities_list, 1):
+        city = entry["city"]
+        state = entry["state"]
+        population = entry["population"]
+        max_results = get_max_results(population, lang=args.lang)
 
-        # Resume: salta il comune se TUTTE le sue keyword sono gia' nel CSV
+        # Resume: salta se tutte le keyword sono gia' nel CSV
         keywords_da_fare = [
             kw for kw in keywords
-            if (comune.lower(), kw.lower()) not in done_pairs
+            if (city.lower(), kw.lower()) not in done_pairs
         ]
         if not keywords_da_fare:
-            logger.info(f"[{idx}/{total}] {comune} — gia' completato, saltato.")
+            logger.info(f"[{idx}/{total}] {city} — gia' completato, saltato.")
             continue
 
-        print(f"[{idx}/{total}] {comune} (pop. {popolazione:,} | max_results={max_results})")
+        print(f"[{idx}/{total}] {city}, {state} (pop. {population:,} | max_results={max_results})")
 
         try:
             results = search_contractors(
-                comune=comune,
-                keywords=keywords,  # passa tutte, la dedup interna gestisce
+                comune=city,
+                keywords=keywords,
                 min_reviews=args.min_reviews,
                 max_reviews=args.max_reviews,
                 check_website_alive=not args.no_http_check,
@@ -194,23 +234,23 @@ def main():
                 scroll_times=args.scroll_times,
                 max_results=max_results,
                 output_csv=out_path,
+                lang=args.lang,
+                state=state,
             )
             n = len(results)
             total_leads += n
             print(f"  -> {n} lead trovati (totale cumulativo: {total_leads})")
 
-            # Aggiorna done_pairs con le keyword appena processate
             for kw in keywords:
-                done_pairs.add((comune.lower(), kw.lower()))
+                done_pairs.add((city.lower(), kw.lower()))
 
         except Exception as e:
-            logger.error(f"[{idx}/{total}] Errore su {comune}: {e}")
-            print(f"  -> ERRORE: {e} — continuo con il prossimo comune")
+            logger.error(f"[{idx}/{total}] Errore su {city}: {e}")
+            print(f"  -> ERRORE: {e} — continuo con la prossima citta'")
 
-        # Pausa anti-ban tra un comune e l'altro
         if idx < total:
             pause = random.uniform(args.pause_min, args.pause_max)
-            logger.info(f"Pausa {pause:.1f}s prima del prossimo comune...")
+            logger.info(f"Pausa {pause:.1f}s prima della prossima citta'...")
             time.sleep(pause)
 
     print(f"\n{'='*60}")
