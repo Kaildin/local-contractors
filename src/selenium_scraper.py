@@ -124,7 +124,11 @@ def sanitize_website(url: str) -> str:
     return u
 
 
-def _scroll_results_panel(driver, scroll_times: int = 10):
+def _scroll_results_panel(driver, scroll_times: int = 10, target_results: int = 200):
+    """
+    Scrolla il pannello risultati fino a caricare almeno target_results risultati.
+    Usa un mix di scroll fissi e scroll dinamici basati sul caricamento effettivo.
+    """
     panel_selectors = [
         "div[role='feed']",
         "div.m6QErb[aria-label]",
@@ -143,17 +147,46 @@ def _scroll_results_panel(driver, scroll_times: int = 10):
         except:
             continue
 
+    # Counter progressivo per monitorare caricamento
+    result_selectors = [
+        "div[role='article']",
+        "div.Nv2PK",
+        "a[href^='/maps/place']",
+        "div.bfdHYd",
+    ]
+
     if panel:
-        for i in range(scroll_times):
+        for scroll_idx in range(scroll_times):
             try:
-                driver.execute_script("arguments[0].scrollTop += 800;", panel)
-                time.sleep(0.6)
+                # Scroll incrementale più aggressivo: 1000px anzichè 800px
+                driver.execute_script("arguments[0].scrollTop += 1000;", panel)
+                time.sleep(0.8)
+                
+                # Verifica quanti risultati sono caricati
+                count = 0
+                for sel in result_selectors:
+                    try:
+                        els = driver.find_elements(By.CSS_SELECTOR, sel)
+                        if els:
+                            count = len(els)
+                            break
+                    except:
+                        continue
+                
+                logger.info(f"[Scroll #{scroll_idx+1}] Risultati caricati: {count}")
+                
+                # Se abbiamo abbastanza risultati, puoi ancora continuare un po'
+                # ma non infinitamente (continua fino a scroll_times oppure quando
+                # il caricamento si ferma)
+                if scroll_idx > 5 and count >= target_results:
+                    logger.info(f"[Scroll] Target {target_results} raggiunto, fermo scroll")
+                    break
             except:
                 break
     else:
         logger.debug("Pannello laterale non trovato, uso scroll pagina")
         for i in range(scroll_times):
-            driver.execute_script(f"window.scrollBy(0, {400 + i*100});")
+            driver.execute_script(f"window.scrollBy(0, {600 + i*150});")
             time.sleep(0.5)
 
 
@@ -537,9 +570,10 @@ def _navigate_to_place(driver, name: str, place_href: str):
         raise
 
 
-def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll_times: int = 10):
+def scrape_with_selenium(search_urls, driver=None, max_results: int = 150, scroll_times: int = 15):
     results = []
     seen_in_run: set = set()
+    diagnostics = {}
 
     if driver is None:
         logger.info("Driver non fornito, inizializzazione...")
@@ -557,6 +591,14 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
         comune_attuale = search['comune']
         keyword = search['keyword']
         url = search['url']
+        
+        search_key = f"{keyword}_{comune_attuale}"
+        diagnostics[search_key] = {
+            "found_in_list": 0,
+            "successfully_processed": 0,
+            "failed": 0,
+            "skipped": 0,
+        }
 
         logger.info(f"Cercando: {keyword} in {comune_attuale}")
 
@@ -610,7 +652,7 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
             time.sleep(2)
 
             logger.info("Scrolling per caricare risultati...")
-            _scroll_results_panel(driver, scroll_times=scroll_times)
+            _scroll_results_panel(driver, scroll_times=scroll_times, target_results=max_results)
 
             selectors_to_try = [
                 "div[role='article']",
@@ -640,6 +682,9 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
                 logger.warning(f"Nessun risultato trovato per {keyword} {comune_attuale}")
                 continue
 
+            diagnostics[search_key]["found_in_list"] = len(result_elements)
+            logger.info(f"[Diagnostica] {search_key}: {len(result_elements)} risultati nella lista")
+
             place_urls = []
             for el in result_elements[:max_results]:
                 href = _extract_place_url_from_element(el)
@@ -658,9 +703,15 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
                         name_candidate = el.get_attribute("aria-label") or ""
                     except:
                         pass
-                place_urls.append({"href": href, "name": name_candidate})
+                if name_candidate and href:  # Solo se abbiamo sia nome che href
+                    place_urls.append({"href": href, "name": name_candidate})
+                elif name_candidate:
+                    logger.debug(f"Saltato: {name_candidate} (no href)")
+                    diagnostics[search_key]["skipped"] += 1
 
             n_to_process = min(max_results, len(place_urls))
+            logger.info(f"[Diagnostica] {search_key}: elaborerò {n_to_process} risultati su {len(place_urls)} estratti")
+            
             for i in range(n_to_process):
                 entry = place_urls[i]
                 place_href = entry["href"]
@@ -670,27 +721,47 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
 
                 if not name:
                     logger.warning("Nome non trovato, risultato saltato")
+                    diagnostics[search_key]["skipped"] += 1
                     continue
 
                 run_key = (name.strip().lower(), comune_attuale.strip().lower())
                 if run_key in seen_in_run:
                     logger.info(f"[Dedup run] Gia' scrapato questa run, saltato: {name}")
+                    diagnostics[search_key]["skipped"] += 1
                     continue
 
                 if not place_href:
                     logger.warning(f"URL scheda non trovato per '{name}', salto.")
+                    diagnostics[search_key]["skipped"] += 1
                     continue
 
-                logger.info(f"Navigazione scheda con bypass limited view: {name}")
-                try:
-                    _navigate_to_place(driver, name, place_href)
-                except Exception as e_nav:
-                    logger.error(f"Errore navigazione scheda '{name}': {e_nav}")
+                # Retry con backoff per navigazione e estrazione
+                nav_success = False
+                extraction_success = False
+                max_nav_retries = 2
+                
+                for nav_attempt in range(max_nav_retries + 1):
+                    logger.info(f"Navigazione scheda con bypass limited view: {name} (tentativo {nav_attempt+1})")
+                    try:
+                        _navigate_to_place(driver, name, place_href)
+                        nav_success = True
+                        break
+                    except Exception as e_nav:
+                        logger.warning(f"Errore navigazione scheda '{name}' (attempt {nav_attempt+1}): {e_nav}")
+                        if nav_attempt < max_nav_retries:
+                            time.sleep(2)
+                        else:
+                            logger.error(f"[Skip] Navigazione fallita dopo {max_nav_retries+1} tentativi: {name}")
+                            diagnostics[search_key]["failed"] += 1
+                            continue
+
+                if not nav_success:
                     continue
 
                 panel_ready = _wait_for_place_page(driver, expected_name=name, timeout=15)
                 if not panel_ready:
                     logger.warning(f"[Skip] Scheda non caricata per '{name}', salto.")
+                    diagnostics[search_key]["failed"] += 1
                     continue
 
                 WebDriverWait(driver, 2).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
@@ -834,11 +905,27 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
 
                 results.append(result)
                 seen_in_run.add(run_key)
+                diagnostics[search_key]["successfully_processed"] += 1
 
             pause_time = random.uniform(3, 5)
             time.sleep(pause_time)
 
         except Exception as e:
             logger.error(f"Errore generale per {keyword} {comune_attuale}: {str(e)}")
+
+    # Stampa diagnostica finale
+    logger.info("\n" + "="*70)
+    logger.info("DIAGNOSTICA FINALE SCRAPING")
+    logger.info("="*70)
+    for search_key, stats in diagnostics.items():
+        logger.info(
+            f"{search_key}: "
+            f"trovati={stats['found_in_list']}, "
+            f"processati={stats['successfully_processed']}, "
+            f"falliti={stats['failed']}, "
+            f"saltati={stats['skipped']}"
+        )
+    logger.info(f"TOTALE RISULTATI FINALI: {len(results)}")
+    logger.info("="*70 + "\n")
 
     return results, driver

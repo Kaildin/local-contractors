@@ -41,8 +41,13 @@ st.sidebar.markdown("### 🦠 Selenium")
 headless = st.sidebar.toggle("Headless (Chrome invisibile)", value=True)
 scroll_times = st.sidebar.slider(
     "Scroll risultati Maps",
-    min_value=2, max_value=15, value=5,
+    min_value=2, max_value=20, value=15,
     help="Quante volte scrolla la lista risultati: più scroll = più attività trovate, ma più lento."
+)
+max_results_per_query = st.sidebar.slider(
+    "Max risultati per query",
+    min_value=20, max_value=200, value=150, step=10,
+    help="Numero massimo di attività da estrarre per ogni ricerca (comune + nicchia)."
 )
 
 output_dir = Path(st.sidebar.text_input("Cartella output", value=str(Path.cwd() / "output")))
@@ -103,7 +108,7 @@ if run:
     st.info(
         f"Cercando in **{len(comuni_list)}** comuni · **{len(selected)}** nicchie · "
         f"Selenium headless: **{'sì' if headless else 'no'}** · "
-        f"Scroll x{scroll_times}"
+        f"Scroll x{scroll_times} · Max {max_results_per_query} risultati/query"
     )
 
     progress   = st.progress(0)
@@ -120,6 +125,7 @@ if run:
             check_website_alive=bool(check_alive),
             headless=bool(headless),
             scroll_times=int(scroll_times),
+            max_results=int(max_results_per_query),
         )
         all_results.extend(results)
         progress.progress((i + 1) / len(comuni_list))
