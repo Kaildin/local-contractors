@@ -175,9 +175,6 @@ def _scroll_results_panel(driver, scroll_times: int = 10, target_results: int = 
                 
                 logger.info(f"[Scroll #{scroll_idx+1}] Risultati caricati: {count}")
                 
-                # Se abbiamo abbastanza risultati, puoi ancora continuare un po'
-                # ma non infinitamente (continua fino a scroll_times oppure quando
-                # il caricamento si ferma)
                 if scroll_idx > 5 and count >= target_results:
                     logger.info(f"[Scroll] Target {target_results} raggiunto, fermo scroll")
                     break
@@ -703,11 +700,8 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 150, scrol
                         name_candidate = el.get_attribute("aria-label") or ""
                     except:
                         pass
-                if name_candidate and href:  # Solo se abbiamo sia nome che href
-                    place_urls.append({"href": href, "name": name_candidate})
-                elif name_candidate:
-                    logger.debug(f"Saltato: {name_candidate} (no href)")
-                    diagnostics[search_key]["skipped"] += 1
+                # Append incondizionale: il check su href vuoto avviene nel loop successivo
+                place_urls.append({"href": href, "name": name_candidate})
 
             n_to_process = min(max_results, len(place_urls))
             logger.info(f"[Diagnostica] {search_key}: elaborerò {n_to_process} risultati su {len(place_urls)} estratti")
