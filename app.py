@@ -90,10 +90,20 @@ if run:
             df_comuni = pd.read_csv(comuni_file)
         else:
             df_comuni = pd.read_excel(comuni_file)
-        comuni_list = (
-            df_comuni["comune"].dropna().tolist()
-            if "comune" in df_comuni.columns else []
-        )
+        # Supporta più formati: IT ('comune') o US ('city','state')
+        if "comune" in df_comuni.columns:
+            comuni_list = df_comuni["comune"].dropna().tolist()
+        elif "city" in df_comuni.columns:
+            # Costruisce lista di dict {'city':..., 'state':...}
+            cities = []
+            for _, row in df_comuni.iterrows():
+                city = (row.get("city") or "").strip()
+                state = (row.get("state") or "").strip()
+                if city:
+                    cities.append({"city": city, "state": state})
+            comuni_list = cities
+        else:
+            comuni_list = []
     else:
         comuni_list = [c.strip() for c in comuni_text.splitlines() if c.strip()]
 
@@ -125,9 +135,19 @@ if run:
     all_results = []
 
     for i, comune in enumerate(comuni_list):
-        status_box.markdown(f"⏳ Scansionando **{comune}** ({i+1}/{len(comuni_list)})…")
+        # Supporta sia stringhe (IT) che dict {'city','state'} (US CSV)
+        if isinstance(comune, dict):
+            city_name = comune.get("city")
+            state_code = comune.get("state") or ""
+            display_name = f"{city_name}, {state_code}" if state_code else city_name
+        else:
+            city_name = comune
+            state_code = ""
+            display_name = city_name
+
+        status_box.markdown(f"⏳ Scansionando **{display_name}** ({i+1}/{len(comuni_list)})…")
         results = search_contractors(
-            comune=comune,
+            comune=city_name,
             keywords=all_keywords,
             min_reviews=int(min_reviews),
             max_reviews=int(max_reviews),
@@ -135,6 +155,7 @@ if run:
             headless=bool(headless),
             scroll_times=int(scroll_times),
             max_results=int(max_results_per_query),
+            state=state_code,
         )
         all_results.extend(results)
         progress.progress((i + 1) / len(comuni_list))
