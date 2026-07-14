@@ -155,6 +155,10 @@ def main():
         help="CSV output (salvataggio incrementale, supporta resume)"
     )
     parser.add_argument(
+        "--max-cities", type=int, default=0,
+        help="Limita il numero di comuni processati dal CSV (0 = tutti)."
+    )
+    parser.add_argument(
         "--pause-min", type=float, default=5.0,
         help="Pausa minima in secondi tra una citta' e l'altra (anti-ban)"
     )
@@ -185,6 +189,10 @@ def main():
     cities_list = load_cities(args.input, state_filter=args.state, lang=args.lang)
     if not cities_list:
         raise SystemExit("Nessuna citta' trovata nel CSV con i filtri specificati.")
+
+    # Applica limite richiesto (--max-cities), 0 = nessun limite
+    if args.max_cities and args.max_cities > 0:
+        cities_list = cities_list[: args.max_cities]
 
     out_path = args.output
     Path(out_path).parent.mkdir(parents=True, exist_ok=True)

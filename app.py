@@ -49,6 +49,11 @@ max_results_per_query = st.sidebar.slider(
     min_value=20, max_value=200, value=150, step=10,
     help="Numero massimo di attività da estrarre per ogni ricerca (comune + nicchia)."
 )
+# Limite di comuni da processare quando si carica un CSV (0 = tutti)
+max_cities_to_process = st.sidebar.number_input(
+    "Limite comuni da CSV (0 = tutti)", min_value=0, value=0, step=1,
+    help="Se >0 processa solo i primi N comuni del CSV caricato per questa run."
+)
 
 output_dir = Path(st.sidebar.text_input("Cartella output", value=str(Path.cwd() / "output")))
 output_dir.mkdir(parents=True, exist_ok=True)
@@ -91,6 +96,10 @@ if run:
         )
     else:
         comuni_list = [c.strip() for c in comuni_text.splitlines() if c.strip()]
+
+    # Applica limite se richiesto (0 = senza limite)
+    if isinstance(max_cities_to_process, int) and max_cities_to_process > 0:
+        comuni_list = comuni_list[:max_cities_to_process]
 
     if not comuni_list:
         st.error("Nessun comune valido trovato.")
