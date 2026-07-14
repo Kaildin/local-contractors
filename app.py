@@ -133,6 +133,10 @@ if run:
     progress   = st.progress(0)
     status_box = st.empty()
     all_results = []
+    
+    # Crea path CSV di output (salvataggio incrementale)
+    ts_name = f"local_contractors_{int(time.time())}.csv"
+    csv_output_path = str(output_dir / ts_name)
 
     for i, comune in enumerate(comuni_list):
         # Supporta sia stringhe (IT) che dict {'city','state'} (US CSV)
@@ -140,10 +144,12 @@ if run:
             city_name = comune.get("city")
             state_code = comune.get("state") or ""
             display_name = f"{city_name}, {state_code}" if state_code else city_name
+            lang = "en"  # US market
         else:
             city_name = comune
             state_code = ""
             display_name = city_name
+            lang = "it"  # IT market
 
         status_box.markdown(f"⏳ Scansionando **{display_name}** ({i+1}/{len(comuni_list)})…")
         results = search_contractors(
@@ -155,6 +161,8 @@ if run:
             headless=bool(headless),
             scroll_times=int(scroll_times),
             max_results=int(max_results_per_query),
+            output_csv=csv_output_path,
+            lang=lang,
             state=state_code,
         )
         all_results.extend(results)
@@ -185,14 +193,11 @@ if run:
             use_container_width=True,
         )
 
-        ts_name    = f"local_contractors_{int(time.time())}.csv"
-        final_path = output_dir / ts_name
-        df.to_csv(final_path, index=False)
-
+        # Il CSV è gia' stato salvato incrementalmente durante la ricerca
         st.download_button(
             label="⬇️ Scarica CSV",
             data=df.to_csv(index=False).encode("utf-8"),
             file_name=ts_name,
             mime="text/csv",
         )
-        st.caption(f"Salvato anche in: `{final_path}`")
+        st.caption(f"✅ Salvato in: `{csv_output_path}` (salvataggio incrementale durante ricerca)")
