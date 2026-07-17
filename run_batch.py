@@ -163,6 +163,14 @@ def main():
         help="Pausa massima in secondi tra una citta' e l'altra (anti-ban)"
     )
     parser.add_argument(
+        "--max-results", type=int, default=None,
+        help=(
+            "Numero massimo di risultati per citta' (override fisso). "
+            "Se omesso, il valore viene calcolato automaticamente "
+            "in base alla popolazione della citta' (10-50 a seconda della taglia)."
+        )
+    )
+    parser.add_argument(
         "--log-level", default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"]
     )
@@ -192,6 +200,7 @@ def main():
     done_pairs = get_already_completed(out_path)
 
     total = len(cities_list)
+    max_results_display = str(args.max_results) if args.max_results is not None else "auto (basato su popolazione)"
     print(f"\n{'='*60}")
     print(f"BATCH SCRAPING")
     print(f"  Citta' da processare  : {total}")
@@ -199,6 +208,8 @@ def main():
     print(f"  Keywords              : {keywords}")
     print(f"  Lingua/mercato        : {args.lang.upper()}")
     print(f"  Filtro stato/prov.    : {args.state or 'tutti'}")
+    print(f"  Max risultati/citta'  : {max_results_display}")
+    print(f"  Recensioni accettate  : {args.min_reviews} - {args.max_reviews}")
     print(f"  Output CSV            : {out_path}")
     print(f"  Headless              : {args.headless}")
     print(f"  Pausa tra citta'      : {args.pause_min}-{args.pause_max}s")
@@ -210,7 +221,13 @@ def main():
         city = entry["city"]
         state = entry["state"]
         population = entry["population"]
-        max_results = get_max_results(population, lang=args.lang)
+
+        # Se --max-results e' passato, usa quello fisso;
+        # altrimenti calcola automaticamente dalla popolazione.
+        if args.max_results is not None:
+            max_results = args.max_results
+        else:
+            max_results = get_max_results(population, lang=args.lang)
 
         # Resume: salta se tutte le keyword sono gia' nel CSV
         keywords_da_fare = [
