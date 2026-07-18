@@ -30,29 +30,28 @@ def _safe_filename(s: str, max_len: int = 80) -> str:
     return s[:max_len]
 
 
-def _save_maps_screenshot(driver, *, comune: str, keyword: str, place_name: str, idx: int) -> str:
+def _save_serp_screenshot(driver, *, comune: str, keyword: str, scroll_idx: int) -> str:
     """
-    Salva uno screenshot della pagina Google Maps "place" appena caricata.
-    Ritorna il path del file creato (stringa) oppure "" se fallisce.
+    Salva uno screenshot della SERP/lista risultati Google Maps
+    per la query iniziale, a ogni scroll.
     """
     try:
-        out_dir = os.environ.get("MAPS_SCREENSHOTS_DIR") or os.path.join("debug", "maps_screenshots")
+        out_dir = "debug"
         os.makedirs(out_dir, exist_ok=True)
 
         ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        slug = _safe_filename(place_name)
         comune_slug = _safe_filename(comune)
         keyword_slug = _safe_filename(keyword)
-        filename = f"{ts}_{idx:03d}_{comune_slug}_{keyword_slug}_{slug}.png"
+        filename = f"serp_{ts}_{scroll_idx:02d}_{comune_slug}_{keyword_slug}.png"
         path = os.path.join(out_dir, filename)
 
-        # Piccola attesa per stabilizzare il rendering (utile in headless)
-        time.sleep(0.4)
+        time.sleep(0.2)
         ok = driver.save_screenshot(path)
         if ok:
+            logger.info(f"[SERP Screenshot] Salvato: {path}")
             return path
     except Exception as e:
-        logger.debug(f"[Screenshot] Errore salvataggio: {e}")
+        logger.debug(f"[SERP Screenshot] Errore salvataggio: {e}")
     return ""
 
 
@@ -124,7 +123,7 @@ def sanitize_website(url: str) -> str:
     return u
 
 
-def _scroll_results_panel(driver, scroll_times: int = 10):
+def _scroll_results_panel(driver, scroll_times: int = 10, comune: str = "", keyword: str = ""):
     panel_selectors = [
         "div[role='feed']",
         "div.m6QErb[aria-label]",
@@ -148,13 +147,28 @@ def _scroll_results_panel(driver, scroll_times: int = 10):
             try:
                 driver.execute_script("arguments[0].scrollTop += 800;", panel)
                 time.sleep(0.6)
+                _save_serp_screenshot(
+                    driver,
+                    comune=comune,
+                    keyword=keyword,
+                    scroll_idx=i + 1,
+                )
             except:
                 break
     else:
         logger.debug("Pannello laterale non trovato, uso scroll pagina")
         for i in range(scroll_times):
-            driver.execute_script(f"window.scrollBy(0, {400 + i*100});")
-            time.sleep(0.5)
+            try:
+                driver.execute_script(f"window.scrollBy(0, {400 + i*100});")
+                time.sleep(0.5)
+                _save_serp_screenshot(
+                    driver,
+                    comune=comune,
+                    keyword=keyword,
+                    scroll_idx=i + 1,
+                )
+            except:
+                break
 
 
 def _extract_place_url_from_element(element) -> str:
@@ -401,15 +415,6 @@ def _navigate_to_place(driver, name: str, place_href: str):
     except Exception:
         pass
 
-    def _debug_shot(label: str):
-        try:
-            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            path = os.path.join("debug", f"{ts}_{label}.png")
-            driver.save_screenshot(path)
-            logger.info(f"[Debug] Screenshot salvato: {path}")
-        except Exception as e:
-            logger.debug(f"[Debug] Screenshot fallito ({label}): {e}")
-
     def _has_review_signals() -> bool:
         review_selectors = [
             "span[aria-label*='recension']",
@@ -476,7 +481,6 @@ def _navigate_to_place(driver, name: str, place_href: str):
         driver.get("https://www.google.com")
         time.sleep(2)
         logger.info("[Nav] Warmup completato")
-        _debug_shot("01_after_warmup")
     except Exception as e:
         logger.debug(f"[Nav] Warmup fallito: {e}")
 
@@ -494,7 +498,6 @@ def _navigate_to_place(driver, name: str, place_href: str):
         driver.get(search_url)
         time.sleep(5)
         logger.info(f"[Nav] URL dopo search: {driver.current_url}")
-        _debug_shot("02_after_search")
     except Exception as e:
         logger.warning(f"[Nav] Search navigation fallita: {e}")
 
@@ -509,7 +512,6 @@ def _navigate_to_place(driver, name: str, place_href: str):
         clicked = _click_first_place_result()
         logger.info(f"[Nav] Esito click da lista: {clicked}")
         logger.info(f"[Nav] URL dopo click lista: {driver.current_url}")
-        _debug_shot("03_after_list_click")
 
         if "/maps/place/" in driver.current_url and _has_review_signals():
             logger.info("[Nav] Scheda place ottenuta cliccando dalla lista")
@@ -521,7 +523,6 @@ def _navigate_to_place(driver, name: str, place_href: str):
         for _ in range(6):
             if _has_review_signals():
                 logger.info("[Nav] Segnali recensioni comparsi dopo attesa")
-                _debug_shot("04_place_with_reviews")
                 return
             time.sleep(1)
 
@@ -531,7 +532,6 @@ def _navigate_to_place(driver, name: str, place_href: str):
         driver.get(place_href)
         time.sleep(4)
         logger.info(f"[Nav] URL dopo fallback diretto: {driver.current_url}")
-        _debug_shot("05_after_direct_fallback")
     except Exception as e:
         logger.error(f"[Nav] Fallback diretto fallito: {e}")
         raise
@@ -610,7 +610,12 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
             time.sleep(2)
 
             logger.info("Scrolling per caricare risultati...")
-            _scroll_results_panel(driver, scroll_times=scroll_times)
+            _scroll_results_panel(
+                driver,
+                scroll_times=scroll_times,
+                comune=comune_attuale,
+                keyword=keyword,
+            )
 
             selectors_to_try = [
                 "div[role='article']",
@@ -692,17 +697,6 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
                 if not panel_ready:
                     logger.warning(f"[Skip] Scheda non caricata per '{name}', salto.")
                     continue
-
-                WebDriverWait(driver, 2).until(EC.presence_of_element_located((By.TAG_NAME, "body")))
-                screenshot_path = _save_maps_screenshot(
-                    driver,
-                    comune=comune_attuale,
-                    keyword=keyword,
-                    place_name=name,
-                    idx=i + 1,
-                )
-                if screenshot_path:
-                    logger.info(f"[Screenshot] Salvato: {screenshot_path}")
 
                 maps_url = driver.current_url
 
