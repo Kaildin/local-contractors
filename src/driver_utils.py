@@ -15,9 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 def init_driver(headless: bool = True):
-    """Inizializza Chrome con auto-detection della versione installata.
-    Identico alla logica di AutReach (driver_utils.py).
-    """
+    """Inizializza Chrome con auto-detection della versione installata."""
     logger.info(f"Inizializzazione driver Chrome (headless={headless})...")
 
     chrome_options = Options()
@@ -45,12 +43,23 @@ def init_driver(headless: bool = True):
     chrome_options.add_argument("--lang=en-US,en")
     chrome_options.add_argument("--window-size=1280,900")
     chrome_options.add_argument(
-        "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        "--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36"
     )
 
-    # --- Auto-detect percorso e versione Chrome/Chromium ---
+    # --- Auto-detect percorso Chrome (macOS + Linux) ---
     chromium_paths = [
+        # macOS - Google Chrome
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        os.path.expanduser("~/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"),
+        # macOS - Chromium
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        os.path.expanduser("~/Applications/Chromium.app/Contents/MacOS/Chromium"),
+        # macOS - Brave
+        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        # macOS - Canary
+        "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
+        # Linux
         "/usr/bin/google-chrome",
         "/usr/bin/google-chrome-stable",
         "/usr/bin/chromium-browser",
@@ -66,6 +75,9 @@ def init_driver(headless: bool = True):
             chromium_binary = path
             logger.info(f"Trovato browser in: {chromium_binary}")
             break
+
+    if not chromium_binary:
+        logger.warning("Nessun binario Chrome trovato nei path noti; uc usera' il default di sistema")
 
     chromium_version_int = None
     if chromium_binary:
@@ -108,18 +120,31 @@ def init_driver(headless: bool = True):
     except Exception as uc_error:
         logger.warning(f"undetected_chromedriver fallito: {uc_error} — provo ChromeDriverManager...")
 
-    # --- Tentativo 2: ChromeDriverManager standard ---
-    is_chromium = "chromium" in (chromium_binary or "").lower()
-    service = webdriver.ChromeService(
-        ChromeDriverManager(
-            chrome_type=ChromeType.CHROMIUM if is_chromium else ChromeType.GOOGLE,
-        ).install()
-    )
-    driver = webdriver.Chrome(service=service, options=chrome_options)
+    # --- Tentativo 2: ChromeDriverManager ---
+    try:
+        is_chromium = "chromium" in (chromium_binary or "").lower()
+        service = webdriver.ChromeService(
+            ChromeDriverManager(
+                chrome_type=ChromeType.CHROMIUM if is_chromium else ChromeType.GOOGLE,
+            ).install()
+        )
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        driver.execute_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
+        logger.info("Chrome avviato con ChromeDriverManager")
+        return driver
+    except Exception as cdm_error:
+        logger.warning(f"ChromeDriverManager fallito: {cdm_error} — provo selenium-manager...")
+
+    # --- Tentativo 3: selenium-manager (bundled con selenium >= 4.6) ---
+    # Scarica automaticamente il chromedriver corretto per la versione
+    # di Chrome installata sul sistema, senza bisogno di specificarla.
+    driver = webdriver.Chrome(options=chrome_options)
     driver.execute_script(
         "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
     )
-    logger.info("Chrome avviato con ChromeDriverManager")
+    logger.info("Chrome avviato con selenium-manager (fallback finale)")
     return driver
 
 
