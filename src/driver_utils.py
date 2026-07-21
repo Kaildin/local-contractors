@@ -56,10 +56,12 @@ def init_driver(headless: bool = True):
         uc_options = uc.ChromeOptions()
         if headless:
             uc_options.add_argument("--headless=new")
+            uc_options.add_argument("--disable-gpu")
+            uc_options.add_argument("--disable-software-rasterizer")
+        else:
+            uc_options.add_argument("--window-position=0,0")
         uc_options.add_argument("--no-sandbox")
         uc_options.add_argument("--disable-dev-shm-usage")
-        uc_options.add_argument("--disable-gpu")
-        uc_options.add_argument("--disable-software-rasterizer")
         uc_options.add_argument("--disable-extensions")
         uc_options.add_argument("--disable-logging")
         uc_options.add_argument("--log-level=3")
@@ -81,7 +83,7 @@ def init_driver(headless: bool = True):
         driver = uc.Chrome(
             options=uc_options,
             version_main=chromium_version_int if chromium_version_int else None,
-            use_subprocess=False,
+            use_subprocess=True,
             suppress_welcome=True,
         )
         logger.info("Chrome avviato con undetected_chromedriver")
@@ -92,10 +94,12 @@ def init_driver(headless: bool = True):
     chrome_options = Options()
     if headless:
         chrome_options.add_argument("--headless=new")
+        chrome_options.add_argument("--disable-gpu")
+        chrome_options.add_argument("--disable-software-rasterizer")
+    else:
+        chrome_options.add_argument("--window-position=0,0")
     chrome_options.add_argument("--no-sandbox")
     chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-gpu")
-    chrome_options.add_argument("--disable-software-rasterizer")
     chrome_options.add_argument("--disable-extensions")
     chrome_options.add_argument("--disable-logging")
     chrome_options.add_argument("--log-level=3")
