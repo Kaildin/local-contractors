@@ -15,9 +15,7 @@ logger = logging.getLogger(__name__)
 
 
 def init_driver(headless: bool = True):
-    """Inizializza Chrome con auto-detection della versione installata.
-    Identico alla logica di AutReach (driver_utils.py).
-    """
+    """Inizializza Chrome con auto-detection della versione installata."""
     logger.info(f"Inizializzazione driver Chrome (headless={headless})...")
 
     chromium_paths = [
@@ -125,9 +123,11 @@ def init_driver(headless: bool = True):
         chrome_options.binary_location = chromium_binary
 
     is_chromium = "chromium" in (chromium_binary or "").lower()
+    # FIX: passa driver_version esplicitamente per evitare mismatch ChromeDriver/Chrome
     service = webdriver.ChromeService(
         ChromeDriverManager(
             chrome_type=ChromeType.CHROMIUM if is_chromium else ChromeType.GOOGLE,
+            driver_version=str(chromium_version_int) if chromium_version_int else None,
         ).install()
     )
     driver = webdriver.Chrome(service=service, options=chrome_options)

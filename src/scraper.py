@@ -26,7 +26,6 @@ def _load_already_scraped(output_csv: str) -> set:
             reader = csv.DictReader(f)
             for row in reader:
                 nome = (row.get("nome") or "").strip().lower()
-                # Supporta sia colonna 'city' (US) che 'comune' (IT legacy)
                 city = (row.get("city") or row.get("comune") or "").strip().lower()
                 if nome:
                     seen.add((nome, city))
@@ -56,23 +55,15 @@ def build_search_urls(
     lang: str = "en",
     state: str = "",
 ) -> List[Dict[str, str]]:
-    """
-    Costruisce le URL di ricerca Google Maps.
-    - lang="en" -> hl=en (US)
-    - lang="it" -> hl=it (IT)
-    - state: aggiunto alla query solo per US (es. "plumber Austin TX")
-    """
     search_urls = []
     for city in cities:
         for keyword in keywords:
-            # Per US aggiunge lo stato alla query per disambiguare
-            # (es. "Springfield" esiste in 30 stati)
             if state:
                 query = f"{keyword} {city} {state}".replace(" ", "+")
             else:
                 query = f"{keyword} {city}".replace(" ", "+")
             search_urls.append({
-                "comune": city,   # chiave 'comune' mantenuta per compatibilita' interna
+                "comune": city,
                 "keyword": keyword,
                 "url": f"https://www.google.com/maps/search/{query}?hl={lang}&gl={'US' if lang == 'en' else 'IT'}",
             })
@@ -92,12 +83,6 @@ def search_contractors(
     lang: str = "en",
     state: str = "",
 ) -> List[Dict[str, Any]]:
-    """
-    Wrapper principale: costruisce gli URL, lancia scrape_with_selenium,
-    applica solo il filtro recensioni.
-    Salva ogni lead (con o senza sito) in modo incrementale.
-    La colonna ha_sito_web (True/False) permette di filtrare in post.
-    """
     already_seen: set = set()
     if output_csv:
         already_seen = _load_already_scraped(output_csv)
@@ -109,6 +94,7 @@ def search_contractors(
         driver=None,
         max_results=max_results,
         scroll_times=scroll_times,
+        headless=headless,  # FIX: propagato correttamente
     )
 
     if driver:
@@ -123,13 +109,11 @@ def search_contractors(
         nome = (r.get("nome") or "").strip()
         city_r = (r.get("comune") or "").strip()
 
-        # --- Deduplicazione: salta se gia' nel CSV ---
         key = (nome.lower(), city_r.lower())
         if key in already_seen:
             logger.info(f"[Resume] Gia' presente, saltato: {nome}")
             continue
 
-        # --- Filtro recensioni ---
         n = r.get("num_recensioni") or 0
         try:
             n = int(n)
@@ -139,12 +123,10 @@ def search_contractors(
             logger.info(f"[Filter] Scartato '{nome}' - recensioni fuori range: {n}")
             continue
 
-        # --- Classifica sito web ---
         website = (r.get("sito_web") or "").strip()
         ha_sito = website_is_real(website, check_alive=check_website_alive) if website else False
         r["ha_sito_web"] = ha_sito
 
-        # Mappa colonne per CSV US
         r["city"] = city_r
         r["state"] = state or ""
 
