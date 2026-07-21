@@ -218,7 +218,7 @@ def _extract_num_recensioni(driver) -> int:
 
         # Pattern A: testo "X recensioni" o "X reviews" nel sorgente
         m = re.search(
-            r'([0-9][0-9\.\,\s]{0,9})\\n?(?:&nbsp;)?(?:recensioni?|reviews?)',
+            r'([0-9][0-9\.\,\s]{0,9})\n?(?:&nbsp;)?(?:recensioni?|reviews?)',
             body_src, re.IGNORECASE
         )
         if m:
@@ -485,13 +485,13 @@ def _navigate_to_place(driver, name: str, place_href: str):
         logger.debug(f"[Nav] Warmup fallito: {e}")
 
     # 2) Search navigation con parametri anti-limited-view
-    # hl=it  -> lingua italiana
-    # gl=IT  -> paese Italia
+    # hl=en  -> lingua inglese
+    # gl=US  -> paese Stati Uniti
     # authuser=0 -> forza sessione non autenticata, evita redirect login
     name_encoded = quote_plus(name)
     search_url = (
         f"https://www.google.com/maps/search/{name_encoded}"
-        f"/?hl=it&gl=IT&authuser=0"
+        f"/?hl=en&gl=US&authuser=0"
     )
     logger.info(f"[Nav] Navigazione via search: {search_url}")
     try:
@@ -707,8 +707,7 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
                         EC.presence_of_element_located((By.CSS_SELECTOR,
                             "span[aria-label*='recension'], "
                             "span[aria-label*='review'], "
-                            "div.F7nice"))
-                    )
+                            "div.F7nice")))
                 except Exception:
                     pass
 
