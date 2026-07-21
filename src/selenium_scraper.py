@@ -537,14 +537,14 @@ def _navigate_to_place(driver, name: str, place_href: str):
         raise
 
 
-def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll_times: int = 10):
+def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll_times: int = 10, headless: bool = True):
     results = []
     seen_in_run: set = set()
 
     if driver is None:
         logger.info("Driver non fornito, inizializzazione...")
         try:
-            driver = init_driver(headless=True)
+            driver = init_driver(headless=headless)
         except Exception as e:
             logger.error(f"Errore inizializzazione Chrome: {e}")
             try:
@@ -566,7 +566,7 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
             for attempt in range(max_retries + 1):
                 try:
                     if driver is None:
-                        driver = init_driver(headless=True)
+                        driver = init_driver(headless=headless)
                     driver.get(url)
                     nav_success = True
                     break

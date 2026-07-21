@@ -42,7 +42,7 @@ def init_driver(headless: bool = True):
     chrome_options.add_argument("--mute-audio")
     chrome_options.add_argument("--no-first-run")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_argument("--lang=it-IT,it")
+    chrome_options.add_argument("--lang=en-US,en")
     chrome_options.add_argument("--window-size=1280,900")
     chrome_options.add_argument(
         "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
@@ -92,7 +92,7 @@ def init_driver(headless: bool = True):
         uc_options.add_argument("--no-sandbox")
         uc_options.add_argument("--disable-dev-shm-usage")
         uc_options.add_argument("--disable-gpu")
-        uc_options.add_argument("--lang=it-IT,it")
+        uc_options.add_argument("--lang=en-US,en")
         uc_options.add_argument("--window-size=1280,900")
         uc_options.add_argument("--disable-blink-features=AutomationControlled")
         if chromium_binary:
