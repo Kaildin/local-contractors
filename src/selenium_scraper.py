@@ -182,7 +182,7 @@ def _scroll_results_panel(
                 end_els = driver.find_elements(By.CSS_SELECTOR, end_sel)
                 for el in end_els:
                     t = (el.text or "").strip().lower()
-                    if not t or any(phrase in t for phrase in END_OF_LIST_TEXTS):
+                    if t and any(phrase in t for phrase in END_OF_LIST_TEXTS):
                         logger.info(f"[Scroll] Fine lista rilevata (selector) al passo {i + 1}")
                         return
             except:
