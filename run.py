@@ -23,6 +23,8 @@ def main():
     parser.add_argument("--scroll-times", type=int, default=30)
     parser.add_argument("--max-results", type=int, default=20)
     parser.add_argument("--headless", action="store_true")
+    parser.add_argument("--lang", default="en", choices=["en", "it"],
+                    help="lang: 'en' = US/EN (default), 'it' = IT/IT")
     parser.add_argument("--no-http-check", action="store_true")
     parser.add_argument("--output", default="output/debug_run.csv")
     parser.add_argument("--log-level", default="INFO",
@@ -48,6 +50,7 @@ def main():
     print(f"Keywords: {keywords}")
     print(f"Recensioni: {args.min_reviews}-{args.max_reviews}")
     print(f"Headless: {args.headless} | HTTP check: {not args.no_http_check} | Scroll: {args.scroll_times}")
+    print(f"lang: {args.lang}")
     print(f"Max risultati per keyword: {args.max_results}")
     print(f"Output CSV: {out_path}\n")
 
@@ -58,6 +61,7 @@ def main():
         max_reviews=args.max_reviews,
         check_website_alive=not args.no_http_check,
         headless=args.headless,
+        lang=args.lang,
         scroll_times=args.scroll_times,
         max_results=args.max_results,
         output_csv=out_path,

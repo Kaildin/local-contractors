@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 # Locale helpers
 # ---------------------------------------------------------------------------
 
-_LOCALE_CONFIG = {
+_LANG_CONFIG = {
     "en": {
         "hl": "en",
         "gl": "US",
@@ -49,9 +49,9 @@ _LOCALE_CONFIG = {
 }
 
 
-def _get_locale_cfg(locale: str) -> dict:
+def _get_lang_cfg(lang: str) -> dict:
     """Restituisce la config per il locale richiesto (default: 'en')."""
-    return _LOCALE_CONFIG.get(locale.lower(), _LOCALE_CONFIG["en"])
+    return _LANG_CONFIG.get(locale.lower(), _LANG_CONFIG["en"])
 
 
 # ---------------------------------------------------------------------------
@@ -93,11 +93,11 @@ def _save_serp_screenshot(driver, *, comune: str, keyword: str, scroll_idx: int)
     return ""
 
 
-def _looks_like_google_status_block(s: str, locale: str = "en") -> bool:
+def _looks_like_google_status_block(s: str, lang: str = "en") -> bool:
     s2 = (s or "").strip().lower()
     if not s2:
         return True
-    cfg = _get_locale_cfg(locale)
+    cfg = _get_lang_cfg(lang)
     return any(t in s2 for t in cfg["status_tokens"])
 
 
@@ -142,12 +142,12 @@ def _is_valid_external_site(href: str) -> bool:
     return True
 
 
-def sanitize_address(addr: str, locale: str = "en") -> str:
+def sanitize_address(addr: str, lang: str = "en") -> str:
     if not addr:
         return ""
     a = addr.strip()
     low = a.lower()
-    cfg = _get_locale_cfg(locale)
+    cfg = _get_lang_cfg(lang)
     if any(t in low for t in cfg["address_junk_tokens"]):
         has_zip = any(tok.isdigit() and len(tok) == 5 for tok in a.split())
         return a if has_zip else ""
@@ -498,7 +498,7 @@ def _wait_for_authority_link(driver, timeout: int = 6) -> bool:
     return False
 
 
-def _navigate_to_place(driver, name: str, place_href: str, locale: str = "en"):
+def _navigate_to_place(driver, name: str, place_href: str, lang: str = "en"):
     """
     Naviga alla scheda Google Maps bypassando la 'limited view' per utenti
     non loggati.
@@ -509,7 +509,7 @@ def _navigate_to_place(driver, name: str, place_href: str, locale: str = "en"):
     3. Click di un risultato dentro Maps per entrare nella scheda place
     4. Fallback diretto solo come ultimissima risorsa
     """
-    cfg = _get_locale_cfg(locale)
+    cfg = _get_lang_cfg(lang)
     hl = cfg["hl"]
     gl = cfg["gl"]
 
@@ -646,14 +646,14 @@ def scrape_with_selenium(
     max_results: int = 20,
     scroll_times: int = 30,
     headless: bool = True,
-    locale: str = "en",
+    lang: str = "en",
 ):
     """
     Args:
         locale: 'en' per mercato US/EN, 'it' per mercato italiano.
                 Controlla lingua browser, hl/gl URL e token sanitizer.
     """
-    cfg = _get_locale_cfg(locale)
+    cfg = _get_lang_cfg(lang)
     results = []
     seen_in_run: set = set()
 
