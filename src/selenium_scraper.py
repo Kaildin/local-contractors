@@ -123,7 +123,37 @@ def sanitize_website(url: str) -> str:
     return u
 
 
-def _scroll_results_panel(driver, scroll_times: int = 10, comune: str = "", keyword: str = ""):
+def _scroll_results_panel(
+    driver,
+    scroll_times: int = 30,
+    comune: str = "",
+    keyword: str = "",
+    stale_limit: int = 3,
+):
+    """
+    Scrolla il pannello risultati Google Maps fino alla fine della lista,
+    fermandosi automaticamente quando:
+      1. Viene rilevato l'elemento di fine lista di GMaps (div.HlvSq / span.HlvSq).
+      2. Il numero di risultati nel DOM rimane invariato per `stale_limit`
+         scroll consecutivi (fallback robusto indipendente dai class name).
+
+    scroll_times: limite massimo di scroll come safety cap (default 30).
+    stale_limit:  quanti scroll senza nuovi risultati prima di fermarsi (default 3).
+    """
+    END_OF_LIST_SELECTORS = [
+        "div.HlvSq",
+        "span.HlvSq",
+    ]
+    END_OF_LIST_TEXTS = [
+        "you've reached the end",
+        "hai raggiunto la fine",
+        "end of list",
+        "fine dell'elenco",
+        "no more results",
+        "nessun altro risultato",
+    ]
+    RESULT_SELECTOR = "div[role='article'], div.Nv2PK"
+
     panel_selectors = [
         "div[role='feed']",
         "div.m6QErb[aria-label]",
@@ -142,33 +172,59 @@ def _scroll_results_panel(driver, scroll_times: int = 10, comune: str = "", keyw
         except:
             continue
 
-    if panel:
-        for i in range(scroll_times):
+    prev_count = 0
+    stale_streak = 0
+
+    for i in range(scroll_times):
+        # --- Segnale 1: elemento fine lista GMaps ---
+        for end_sel in END_OF_LIST_SELECTORS:
             try:
+                end_els = driver.find_elements(By.CSS_SELECTOR, end_sel)
+                for el in end_els:
+                    t = (el.text or "").strip().lower()
+                    if not t or any(phrase in t for phrase in END_OF_LIST_TEXTS):
+                        logger.info(f"[Scroll] Fine lista rilevata (selector) al passo {i + 1}")
+                        return
+            except:
+                continue
+
+        # --- Segnale 2: conteggio risultati stabile (fallback) ---
+        try:
+            current_count = len(driver.find_elements(By.CSS_SELECTOR, RESULT_SELECTOR))
+            if current_count > 0 and current_count == prev_count:
+                stale_streak += 1
+                logger.debug(
+                    f"[Scroll] Conteggio stabile ({current_count}) - streak {stale_streak}/{stale_limit}"
+                )
+                if stale_streak >= stale_limit:
+                    logger.info(
+                        f"[Scroll] Nessun nuovo risultato per {stale_limit} scroll consecutivi, stop."
+                    )
+                    return
+            else:
+                stale_streak = 0
+            prev_count = current_count
+        except:
+            pass
+
+        # --- Esegui lo scroll ---
+        try:
+            if panel:
                 driver.execute_script("arguments[0].scrollTop += 800;", panel)
-                time.sleep(0.6)
-                _save_serp_screenshot(
-                    driver,
-                    comune=comune,
-                    keyword=keyword,
-                    scroll_idx=i + 1,
-                )
-            except:
-                break
-    else:
-        logger.debug("Pannello laterale non trovato, uso scroll pagina")
-        for i in range(scroll_times):
-            try:
-                driver.execute_script(f"window.scrollBy(0, {400 + i*100});")
-                time.sleep(0.5)
-                _save_serp_screenshot(
-                    driver,
-                    comune=comune,
-                    keyword=keyword,
-                    scroll_idx=i + 1,
-                )
-            except:
-                break
+            else:
+                logger.debug("Pannello laterale non trovato, uso scroll pagina")
+                driver.execute_script(f"window.scrollBy(0, {400 + i * 100});")
+            time.sleep(0.7)
+            _save_serp_screenshot(
+                driver,
+                comune=comune,
+                keyword=keyword,
+                scroll_idx=i + 1,
+            )
+        except:
+            break
+
+    logger.info(f"[Scroll] Raggiunto limite massimo scroll ({scroll_times}).")
 
 
 def _extract_place_url_from_element(element) -> str:
@@ -537,7 +593,7 @@ def _navigate_to_place(driver, name: str, place_href: str):
         raise
 
 
-def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll_times: int = 10, headless: bool = True):
+def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll_times: int = 30, headless: bool = True):
     results = []
     seen_in_run: set = set()
 
