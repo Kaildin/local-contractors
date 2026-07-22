@@ -147,7 +147,7 @@ def main():
     )
     parser.add_argument("--min-reviews", type=int, default=1)
     parser.add_argument("--max-reviews", type=int, default=100)
-    parser.add_argument("--scroll-times", type=int, default=10)
+    parser.add_argument("--scroll-times", type=int, default=30)
     parser.add_argument("--headless", action="store_true")
     parser.add_argument("--no-http-check", action="store_true")
     parser.add_argument(
