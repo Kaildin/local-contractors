@@ -20,7 +20,7 @@ from .text_utils import clean_extracted_text
 logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
-# Locale helpers
+# lang helpers
 # ---------------------------------------------------------------------------
 
 _LANG_CONFIG = {
@@ -50,8 +50,8 @@ _LANG_CONFIG = {
 
 
 def _get_lang_cfg(lang: str) -> dict:
-    """Restituisce la config per il locale richiesto (default: 'en')."""
-    return _LANG_CONFIG.get(locale.lower(), _LANG_CONFIG["en"])
+    """Restituisce la config per il lang richiesto (default: 'en')."""
+    return _LANG_CONFIG.get(lang.lower(), _LANG_CONFIG["en"])
 
 
 # ---------------------------------------------------------------------------
@@ -650,7 +650,7 @@ def scrape_with_selenium(
 ):
     """
     Args:
-        locale: 'en' per mercato US/EN, 'it' per mercato italiano.
+        lang: 'en' per mercato US/EN, 'it' per mercato italiano.
                 Controlla lingua browser, hl/gl URL e token sanitizer.
     """
     cfg = _get_lang_cfg(lang)
@@ -674,7 +674,7 @@ def scrape_with_selenium(
         keyword = search['keyword']
         url = search['url']
 
-        logger.info(f"Cercando: {keyword} in {comune_attuale} [locale={locale}]")
+        logger.info(f"Cercando: {keyword} in {comune_attuale} [lang={lang}]")
 
         try:
             max_retries = 2
@@ -804,7 +804,7 @@ def scrape_with_selenium(
 
                 logger.info(f"Navigazione scheda con bypass limited view: {name}")
                 try:
-                    _navigate_to_place(driver, name, place_href, locale=locale)
+                    _navigate_to_place(driver, name, place_href, lang=lang)
                 except Exception as e_nav:
                     logger.error(f"Errore navigazione scheda '{name}': {e_nav}")
                     continue
@@ -847,7 +847,7 @@ def scrape_with_selenium(
                             for ae in addr_elements:
                                 addr_text = ae.text.strip() or ae.get_attribute("aria-label") or ""
                                 if addr_text:
-                                    if _looks_like_google_status_block(addr_text, locale=locale):
+                                    if _looks_like_google_status_block(addr_text, lang=lang):
                                         continue
                                     if not _looks_like_address(addr_text):
                                         continue
@@ -925,7 +925,7 @@ def scrape_with_selenium(
                 if not website:
                     logger.info(f"Sito web non trovato per {name}")
 
-                address = sanitize_address(address, locale=locale)
+                address = sanitize_address(address, lang=lang)
                 website = sanitize_website(website)
 
                 result = {
