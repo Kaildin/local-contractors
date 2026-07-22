@@ -3,5 +3,10 @@ __pycache__/
 *.pyc
 output/
 data/
+debug/
 *.csv
 .DS_Store
+*.log
+.venv/
+
+.vscode/
