@@ -19,6 +19,44 @@ from .text_utils import clean_extracted_text
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Locale helpers
+# ---------------------------------------------------------------------------
+
+_LOCALE_CONFIG = {
+    "en": {
+        "hl": "en",
+        "gl": "US",
+        "lang": "en-US,en",
+        "status_tokens": [
+            "closed", "opens", "stars", "review", "rating", "\u00b7", "hours", "open",
+        ],
+        "address_junk_tokens": [
+            "closed", "opens", "stars", "review", "\u00b7",
+        ],
+    },
+    "it": {
+        "hl": "it",
+        "gl": "IT",
+        "lang": "it-IT,it",
+        "status_tokens": [
+            "chiuso", "apre", "stelle", "recension", "valutaz", "\u00b7", "ore", "orari",
+        ],
+        "address_junk_tokens": [
+            "chiuso", "apre", "stelle", "recension", "\u00b7",
+        ],
+    },
+}
+
+
+def _get_locale_cfg(locale: str) -> dict:
+    """Restituisce la config per il locale richiesto (default: 'en')."""
+    return _LOCALE_CONFIG.get(locale.lower(), _LOCALE_CONFIG["en"])
+
+
+# ---------------------------------------------------------------------------
+# Utility functions
+# ---------------------------------------------------------------------------
 
 def _safe_filename(s: str, max_len: int = 80) -> str:
     s = (s or "").strip().lower()
@@ -55,12 +93,12 @@ def _save_serp_screenshot(driver, *, comune: str, keyword: str, scroll_idx: int)
     return ""
 
 
-def _looks_like_google_status_block(s: str) -> bool:
+def _looks_like_google_status_block(s: str, locale: str = "en") -> bool:
     s2 = (s or "").strip().lower()
     if not s2:
         return True
-    bad_tokens = ["chiuso", "apre", "stelle", "recension", "valutaz", "\u00b7", "ore", "orari"]
-    return any(t in s2 for t in bad_tokens)
+    cfg = _get_locale_cfg(locale)
+    return any(t in s2 for t in cfg["status_tokens"])
 
 
 def _looks_like_address(s: str) -> bool:
@@ -69,6 +107,7 @@ def _looks_like_address(s: str) -> bool:
         return False
     has_digit = any(ch.isdigit() for ch in s2)
     has_comma = "," in s2
+    # US ZIP (5 digits) or IT CAP (5 digits)
     has_cap = any(token.isdigit() and len(token) == 5 for token in s2.split())
     return has_digit and (has_comma or has_cap)
 
@@ -103,14 +142,15 @@ def _is_valid_external_site(href: str) -> bool:
     return True
 
 
-def sanitize_address(addr: str) -> str:
+def sanitize_address(addr: str, locale: str = "en") -> str:
     if not addr:
         return ""
     a = addr.strip()
     low = a.lower()
-    if any(t in low for t in ["chiuso", "apre", "stelle", "recension", "\u00b7"]):
-        has_cap = any(tok.isdigit() and len(tok) == 5 for tok in a.split())
-        return a if has_cap else ""
+    cfg = _get_locale_cfg(locale)
+    if any(t in low for t in cfg["address_junk_tokens"]):
+        has_zip = any(tok.isdigit() and len(tok) == 5 for tok in a.split())
+        return a if has_zip else ""
     return a
 
 
@@ -123,6 +163,10 @@ def sanitize_website(url: str) -> str:
     return u
 
 
+# ---------------------------------------------------------------------------
+# Scroll
+# ---------------------------------------------------------------------------
+
 def _scroll_results_panel(
     driver,
     scroll_times: int = 30,
@@ -133,7 +177,8 @@ def _scroll_results_panel(
     """
     Scrolla il pannello risultati Google Maps fino alla fine della lista,
     fermandosi automaticamente quando:
-      1. Viene rilevato l'elemento di fine lista di GMaps (div.HlvSq / span.HlvSq).
+      1. Viene rilevato l'elemento di fine lista di GMaps (div.HlvSq / span.HlvSq)
+         con testo di fine lista riconosciuto (non su elementi vuoti).
       2. Il numero di risultati nel DOM rimane invariato per `stale_limit`
          scroll consecutivi (fallback robusto indipendente dai class name).
 
@@ -177,6 +222,8 @@ def _scroll_results_panel(
 
     for i in range(scroll_times):
         # --- Segnale 1: elemento fine lista GMaps ---
+        # Si ferma SOLO se l'elemento ha testo riconoscibile di fine lista.
+        # Elementi vuoti con la stessa classe vengono ignorati (falso positivo).
         for end_sel in END_OF_LIST_SELECTORS:
             try:
                 end_els = driver.find_elements(By.CSS_SELECTOR, end_sel)
@@ -227,6 +274,10 @@ def _scroll_results_panel(
     logger.info(f"[Scroll] Raggiunto limite massimo scroll ({scroll_times}).")
 
 
+# ---------------------------------------------------------------------------
+# Place extraction helpers
+# ---------------------------------------------------------------------------
+
 def _extract_place_url_from_element(element) -> str:
     try:
         links = element.find_elements(By.CSS_SELECTOR, "a[href*='/maps/place/']")
@@ -264,10 +315,6 @@ def _extract_num_recensioni(driver) -> int:
 
     # ------------------------------------------------------------------ #
     # Strategia 0: JSON embedded nel page_source                          #
-    # Google Maps inietta i dati come array JS nel sorgente della pagina. #
-    # Il numero di recensioni appare in pattern tipo:                     #
-    #   "1.234 recensioni" oppure stella float vicino a int recensioni.   #
-    # Questo funziona anche quando il DOM e' in limited view.             #
     # ------------------------------------------------------------------ #
     try:
         body_src = driver.page_source
@@ -284,7 +331,6 @@ def _extract_num_recensioni(driver) -> int:
                 return n
 
         # Pattern B: coppia (rating_float, n_recensioni) nel JSON array
-        # Cerca un numero float tipo 4.5 o 3.8 seguito a breve da un intero
         rating_positions = [m.start() for m in re.finditer(
             r'[,\[]\s*[1-5]\.[0-9]\s*,', body_src
         )]
@@ -324,7 +370,6 @@ def _extract_num_recensioni(driver) -> int:
 
     # ------------------------------------------------------------------ #
     # Strategia 1b: selettori CSS 2025/2026 blocco rating                 #
-    # div.F7nice contiene testo tipo "4,5(1.234)" o "4,5\n1.234"          #
     # ------------------------------------------------------------------ #
     try:
         for sel in [
@@ -341,14 +386,12 @@ def _extract_num_recensioni(driver) -> int:
                     txt = (el.text or "").strip()
                     if not txt:
                         continue
-                    # Formato "4,5(1.234)" -- numero tra parentesi
                     m = re.search(r'\(([0-9][0-9\.\,]*)\)', txt)
                     if m:
                         n = int(re.sub(r'[^\d]', '', m.group(1)))
                         if n > 0:
                             logger.info(f"[Rec] trovate {n} da {sel} (parentesi)")
                             return n
-                    # Formato "1.234 recensioni" nel testo dell'elemento
                     m2 = re.search(r'([0-9][0-9\.\,]*)\s*recensioni?', txt, re.IGNORECASE)
                     if not m2:
                         m2 = re.search(r'([0-9][0-9\.\,]*)\s*reviews?', txt, re.IGNORECASE)
@@ -455,7 +498,7 @@ def _wait_for_authority_link(driver, timeout: int = 6) -> bool:
     return False
 
 
-def _navigate_to_place(driver, name: str, place_href: str):
+def _navigate_to_place(driver, name: str, place_href: str, locale: str = "en"):
     """
     Naviga alla scheda Google Maps bypassando la 'limited view' per utenti
     non loggati.
@@ -466,6 +509,10 @@ def _navigate_to_place(driver, name: str, place_href: str):
     3. Click di un risultato dentro Maps per entrare nella scheda place
     4. Fallback diretto solo come ultimissima risorsa
     """
+    cfg = _get_locale_cfg(locale)
+    hl = cfg["hl"]
+    gl = cfg["gl"]
+
     try:
         os.makedirs("debug", exist_ok=True)
     except Exception:
@@ -479,10 +526,9 @@ def _navigate_to_place(driver, name: str, place_href: str):
             "button[aria-label*='review']",
             "[data-tab-index='1']",
             "div[role='tab']",
-            # Selettori 2025/2026 presenti nella scheda place completa
-            "div.F7nice",    # blocco stelle + conteggio recensioni
-            "span.ceNzKf",   # stelle singole nel blocco rating
-            "div.UaQhfb",    # panel info principale della scheda
+            "div.F7nice",
+            "span.ceNzKf",
+            "div.UaQhfb",
         ]
         for sel in review_selectors:
             try:
@@ -541,13 +587,10 @@ def _navigate_to_place(driver, name: str, place_href: str):
         logger.debug(f"[Nav] Warmup fallito: {e}")
 
     # 2) Search navigation con parametri anti-limited-view
-    # hl=en  -> lingua inglese
-    # gl=US  -> paese Stati Uniti
-    # authuser=0 -> forza sessione non autenticata, evita redirect login
     name_encoded = quote_plus(name)
     search_url = (
         f"https://www.google.com/maps/search/{name_encoded}"
-        f"/?hl=en&gl=US&authuser=0"
+        f"/?hl={hl}&gl={gl}&authuser=0"
     )
     logger.info(f"[Nav] Navigazione via search: {search_url}")
     try:
@@ -593,18 +636,35 @@ def _navigate_to_place(driver, name: str, place_href: str):
         raise
 
 
-def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll_times: int = 30, headless: bool = True):
+# ---------------------------------------------------------------------------
+# Main scrape entry point
+# ---------------------------------------------------------------------------
+
+def scrape_with_selenium(
+    search_urls,
+    driver=None,
+    max_results: int = 20,
+    scroll_times: int = 30,
+    headless: bool = True,
+    locale: str = "en",
+):
+    """
+    Args:
+        locale: 'en' per mercato US/EN, 'it' per mercato italiano.
+                Controlla lingua browser, hl/gl URL e token sanitizer.
+    """
+    cfg = _get_locale_cfg(locale)
     results = []
     seen_in_run: set = set()
 
     if driver is None:
         logger.info("Driver non fornito, inizializzazione...")
         try:
-            driver = init_driver(headless=headless)
+            driver = init_driver(headless=headless, lang=cfg["lang"])
         except Exception as e:
             logger.error(f"Errore inizializzazione Chrome: {e}")
             try:
-                driver = init_driver(headless=False)
+                driver = init_driver(headless=False, lang=cfg["lang"])
             except Exception as e2:
                 logger.critical(f"Impossibile avviare Chrome: {e2}")
                 raise
@@ -614,7 +674,7 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
         keyword = search['keyword']
         url = search['url']
 
-        logger.info(f"Cercando: {keyword} in {comune_attuale}")
+        logger.info(f"Cercando: {keyword} in {comune_attuale} [locale={locale}]")
 
         try:
             max_retries = 2
@@ -622,7 +682,7 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
             for attempt in range(max_retries + 1):
                 try:
                     if driver is None:
-                        driver = init_driver(headless=headless)
+                        driver = init_driver(headless=headless, lang=cfg["lang"])
                     driver.get(url)
                     nav_success = True
                     break
@@ -744,7 +804,7 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
 
                 logger.info(f"Navigazione scheda con bypass limited view: {name}")
                 try:
-                    _navigate_to_place(driver, name, place_href)
+                    _navigate_to_place(driver, name, place_href, locale=locale)
                 except Exception as e_nav:
                     logger.error(f"Errore navigazione scheda '{name}': {e_nav}")
                     continue
@@ -756,8 +816,6 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
 
                 maps_url = driver.current_url
 
-                # Attesa esplicita elemento recensioni prima di estrarre
-                # Aggiunto div.F7nice come alternativa ai selector aria-label
                 try:
                     WebDriverWait(driver, 8).until(
                         EC.presence_of_element_located((By.CSS_SELECTOR,
@@ -789,7 +847,7 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
                             for ae in addr_elements:
                                 addr_text = ae.text.strip() or ae.get_attribute("aria-label") or ""
                                 if addr_text:
-                                    if _looks_like_google_status_block(addr_text):
+                                    if _looks_like_google_status_block(addr_text, locale=locale):
                                         continue
                                     if not _looks_like_address(addr_text):
                                         continue
@@ -867,7 +925,7 @@ def scrape_with_selenium(search_urls, driver=None, max_results: int = 20, scroll
                 if not website:
                     logger.info(f"Sito web non trovato per {name}")
 
-                address = sanitize_address(address)
+                address = sanitize_address(address, locale=locale)
                 website = sanitize_website(website)
 
                 result = {

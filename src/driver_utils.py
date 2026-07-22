@@ -14,9 +14,14 @@ import undetected_chromedriver as uc
 logger = logging.getLogger(__name__)
 
 
-def init_driver(headless: bool = True):
-    """Inizializza Chrome con auto-detection della versione installata."""
-    logger.info(f"Inizializzazione driver Chrome (headless={headless})...")
+def init_driver(headless: bool = True, lang: str = "en-US,en"):
+    """Inizializza Chrome con auto-detection della versione installata.
+
+    Args:
+        headless: avvia Chrome in modalita' headless se True.
+        lang: stringa lingua da passare a --lang (es. 'en-US,en' oppure 'it-IT,it').
+    """
+    logger.info(f"Inizializzazione driver Chrome (headless={headless}, lang={lang})...")
 
     chromium_paths = [
         "/usr/bin/google-chrome",
@@ -27,6 +32,11 @@ def init_driver(headless: bool = True):
         shutil.which("google-chrome"),
         shutil.which("chromium-browser"),
         shutil.which("chromium"),
+        # macOS paths
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        "/Applications/Google Chrome Canary.app/Contents/MacOS/Google Chrome Canary",
     ]
     chromium_binary = None
     for path in chromium_paths:
@@ -73,7 +83,7 @@ def init_driver(headless: bool = True):
         uc_options.add_argument("--disable-sync")
         uc_options.add_argument("--mute-audio")
         uc_options.add_argument("--no-first-run")
-        uc_options.add_argument("--lang=en-US,en")
+        uc_options.add_argument(f"--lang={lang}")
         uc_options.add_argument("--window-size=1280,900")
         if chromium_binary:
             uc_options.binary_location = chromium_binary
@@ -113,7 +123,7 @@ def init_driver(headless: bool = True):
     chrome_options.add_argument("--mute-audio")
     chrome_options.add_argument("--no-first-run")
     chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_argument("--lang=en-US,en")
+    chrome_options.add_argument(f"--lang={lang}")
     chrome_options.add_argument("--window-size=1280,900")
     chrome_options.add_argument(
         "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
