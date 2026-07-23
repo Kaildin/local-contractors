@@ -5,14 +5,15 @@ from pathlib import Path
 from typing import List, Dict, Any, Optional
 
 from .selenium_scraper import scrape_with_selenium
-from .website_checker import website_is_real
+from .website_checker import get_website_status, website_is_real
 from .driver_utils import cleanup_chrome_tmp
 
 logger = logging.getLogger(__name__)
 
 CSV_FIELDNAMES = [
     "city", "state", "keyword", "nome", "indirizzo", "telefono",
-    "sito_web", "ha_sito_web", "num_recensioni", "maps_url",
+    "sito_web", "ha_sito_web", "website_status_code", "website_check_reason",
+    "num_recensioni", "maps_url",
 ]
 
 
@@ -95,7 +96,7 @@ def search_contractors(
         driver=None,
         max_results=max_results,
         scroll_times=scroll_times,
-        headless=headless,  # FIX: propagato correttamente
+        headless=headless,
     )
 
     if driver:
@@ -125,8 +126,25 @@ def search_contractors(
             continue
 
         website = (r.get("sito_web") or "").strip()
-        ha_sito = website_is_real(website, check_alive=check_website_alive) if website else False
-        r["ha_sito_web"] = ha_sito
+
+        if website and not website_is_real(website, check_alive=False):
+            status = {
+                "ok": False,
+                "status_code": None,
+                "final_url": website,
+                "reason": "social_or_builder",
+            }
+        else:
+            status = get_website_status(website) if (website and check_website_alive) else {
+                "ok": bool(website),
+                "status_code": None,
+                "final_url": website,
+                "reason": "not_checked" if website else "empty_url",
+            }
+
+        r["ha_sito_web"] = status["ok"]
+        r["website_status_code"] = status["status_code"]
+        r["website_check_reason"] = status["reason"]
 
         r["city"] = city_r
         r["state"] = state or ""
@@ -144,6 +162,6 @@ def search_contractors(
 
         if output_csv:
             _append_lead_to_csv(output_csv, r)
-            logger.info(f"[Salvataggio] Lead salvato: {nome} (ha_sito_web={ha_sito})")
+            logger.info(f"[Salvataggio] Lead salvato: {nome} (ha_sito_web={status['ok']}, reason={status['reason']})")
 
     return filtered

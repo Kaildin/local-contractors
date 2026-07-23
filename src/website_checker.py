@@ -4,7 +4,6 @@ from urllib.parse import urlparse
 
 logger = logging.getLogger(__name__)
 
-# Domini social/directory che NON contano come "sito web reale"
 SOCIAL_DOMAINS = {
     "facebook.com", "fb.com",
     "instagram.com",
@@ -26,8 +25,6 @@ SOCIAL_DOMAINS = {
     "beacons.ai",
 }
 
-# Piattaforme website-builder: hanno un sito ma NON e' un sito proprietario
-# -> trattate come "nessun sito" ai fini del filtro
 WEBSITE_BUILDER_DOMAINS = {
     "wixsite.com",
     "wix.com",
@@ -39,7 +36,7 @@ WEBSITE_BUILDER_DOMAINS = {
     "strikingly.com",
     "yolasite.com",
     "godaddysites.com",
-    "wordpress.com",  # .com hosted (NON .org self-hosted)
+    "wordpress.com",
     "blogger.com",
     "blogspot.com",
     "altervista.org",
@@ -47,7 +44,6 @@ WEBSITE_BUILDER_DOMAINS = {
 
 
 def _root_domain(url: str) -> str:
-    """Estrae il dominio radice (es. 'facebook.com') da un URL."""
     try:
         host = urlparse(url).netloc.lower().lstrip("www.")
         parts = host.split(".")
@@ -59,31 +55,25 @@ def _root_domain(url: str) -> str:
 
 
 def is_social_or_directory(url: str) -> bool:
-    """True se l'URL punta a un social network o directory, non a un sito proprietario."""
     if not url:
         return False
-    domain = _root_domain(url)
-    return domain in SOCIAL_DOMAINS
+    return _root_domain(url) in SOCIAL_DOMAINS
 
 
 def is_website_builder(url: str) -> bool:
-    """
-    True se il sito e' ospitato su una piattaforma website-builder (Wix, Squarespace ecc.).
-    Questi vengono trattati come "nessun sito proprietario".
-    """
     if not url:
         return False
-    domain = _root_domain(url)
-    return domain in WEBSITE_BUILDER_DOMAINS
+    return _root_domain(url) in WEBSITE_BUILDER_DOMAINS
 
 
-def is_website_alive(url: str, timeout: int = 8) -> bool:
-    """
-    Verifica con requests (HEAD poi GET) se il sito risponde con 2xx o 3xx.
-    Ritorna False se timeout / errore connessione / HTTP >= 400.
-    """
+def get_website_status(url: str, timeout: int = 8) -> dict:
     if not url:
-        return False
+        return {
+            "ok": False,
+            "status_code": None,
+            "final_url": "",
+            "reason": "empty_url",
+        }
 
     if not url.startswith(("http://", "https://")):
         url = "https://" + url
@@ -93,40 +83,37 @@ def is_website_alive(url: str, timeout: int = 8) -> bool:
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
             "AppleWebKit/537.36 (KHTML, like Gecko) "
             "Chrome/122.0.0.0 Safari/537.36"
-        )
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-US,en;q=0.9",
     }
 
     try:
-        r = requests.head(url, headers=headers, timeout=timeout,
-                          allow_redirects=True, verify=False)
-        if r.status_code < 400:
-            return True
-        r = requests.get(url, headers=headers, timeout=timeout,
-                         allow_redirects=True, verify=False, stream=True)
-        return r.status_code < 400
-    except Exception as e:
-        logger.debug(f"[WebCheck] {url} -> non raggiungibile: {e}")
-        return False
+        r = requests.get(
+            url,
+            headers=headers,
+            timeout=timeout,
+            allow_redirects=True,
+            verify=False,
+            stream=True,
+        )
+        code = r.status_code
+        if code < 400:
+            return {"ok": True, "status_code": code, "final_url": r.url, "reason": "ok"}
+        if code == 403:
+            return {"ok": True, "status_code": code, "final_url": r.url, "reason": "forbidden_but_present"}
+        return {"ok": False, "status_code": code, "final_url": r.url, "reason": f"http_{code}"}
+    except requests.RequestException as e:
+        return {"ok": False, "status_code": None, "final_url": url, "reason": type(e).__name__}
 
 
 def website_is_real(url: str, check_alive: bool = True) -> bool:
-    """
-    Ritorna True SOLO se il sito e' un sito proprietario reale:
-      1. Non e' vuoto
-      2. Non e' un social/directory
-      3. Non e' un website-builder (Wix, Squarespace ecc.)
-      4. (opzionale) Risponde online
-    Se ritorna False -> il lead e' un candidato valido (nessun sito reale).
-    """
     if not url:
         return False
     if is_social_or_directory(url):
-        logger.info(f"[WebCheck] Scartato (social/directory): {url}")
         return False
     if is_website_builder(url):
-        logger.info(f"[WebCheck] Scartato (website-builder, trattato come nessun sito): {url}")
         return False
-    if check_alive and not is_website_alive(url):
-        logger.info(f"[WebCheck] Scartato (sito morto): {url}")
-        return False
+    if check_alive:
+        return get_website_status(url)["ok"]
     return True
