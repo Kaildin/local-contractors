@@ -170,6 +170,8 @@ def main():
             "in base alla popolazione della citta' (10-50 a seconda della taglia)."
         )
     )
+    parser.add_argument("--debug-screenshot", action="store_true", default=False,
+                        help="Salva screenshot SERP per debug")
     parser.add_argument(
         "--log-level", default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"]
