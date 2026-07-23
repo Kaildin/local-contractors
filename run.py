@@ -65,6 +65,7 @@ def main():
         scroll_times=args.scroll_times,
         max_results=args.max_results,
         output_csv=out_path,
+        debug_screenshot=args.debug_screenshot,
     )
 
     print(f"\n{'='*60}")

@@ -173,6 +173,7 @@ def _scroll_results_panel(
     comune: str = "",
     keyword: str = "",
     stale_limit: int = 3,
+    debug_screenshot: bool = False,
 ):
     """
     Scrolla il pannello risultati Google Maps fino alla fine della lista,
@@ -262,12 +263,13 @@ def _scroll_results_panel(
                 logger.debug("Pannello laterale non trovato, uso scroll pagina")
                 driver.execute_script(f"window.scrollBy(0, {400 + i * 100});")
             time.sleep(0.7)
-            _save_serp_screenshot(
-                driver,
-                comune=comune,
-                keyword=keyword,
-                scroll_idx=i + 1,
-            )
+            if debug_screenshot:
+                _save_serp_screenshot(
+                    driver,
+                    comune=comune,
+                    keyword=keyword,
+                    scroll_idx=i + 1,
+                )
         except:
             break
 

@@ -73,6 +73,7 @@ def build_search_urls(
 def search_contractors(
     comune: str,
     keywords: List[str],
+    debug_screenshot: bool = False,
     min_reviews: int = 1,
     max_reviews: int = 15,
     check_website_alive: bool = True,

@@ -8,5 +8,5 @@ debug/
 .DS_Store
 *.log
 .venv/
-
+input/
 .vscode/

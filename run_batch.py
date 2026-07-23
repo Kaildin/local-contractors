@@ -253,6 +253,7 @@ def main():
                 output_csv=out_path,
                 lang=args.lang,
                 state=state,
+                debug_screenshot=args.debug_screenshot,
             )
             n = len(results)
             total_leads += n
