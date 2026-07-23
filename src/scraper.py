@@ -97,6 +97,7 @@ def search_contractors(
         max_results=max_results,
         scroll_times=scroll_times,
         headless=headless,
+        debug_screenshot=debug_screenshot,
     )
 
     if driver:

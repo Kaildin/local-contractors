@@ -27,6 +27,8 @@ def main():
                     help="lang: 'en' = US/EN (default), 'it' = IT/IT")
     parser.add_argument("--no-http-check", action="store_true")
     parser.add_argument("--output", default="output/debug_run.csv")
+    parser.add_argument("--debug-screenshot", action="store_true", default=False,
+                        help="Salva screenshot SERP per debug")
     parser.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = parser.parse_args()
