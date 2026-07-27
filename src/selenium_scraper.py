@@ -2,6 +2,7 @@ import logging
 import time
 import random
 import re
+import csv
 
 import os
 import datetime
@@ -69,10 +70,6 @@ def _safe_filename(s: str, max_len: int = 80) -> str:
 
 
 def _save_serp_screenshot(driver, *, comune: str, keyword: str, scroll_idx: int) -> str:
-    """
-    Salva uno screenshot della SERP/lista risultati Google Maps
-    per la query iniziale, a ogni scroll.
-    """
     try:
         out_dir = "debug"
         os.makedirs(out_dir, exist_ok=True)
@@ -93,6 +90,43 @@ def _save_serp_screenshot(driver, *, comune: str, keyword: str, scroll_idx: int)
     return ""
 
 
+def _dump_serp_names_csv(place_urls: list, *, comune: str, keyword: str) -> str:
+    """
+    Scrive un CSV temporaneo in debug/ con i nomi dei business estratti
+    dalla pagina dei risultati SERP, prima di navigare nelle singole schede.
+
+    Colonne: index, nome, maps_href
+    Nome file: debug/serp_names_<comune>_<keyword>_<timestamp>.csv
+
+    Utile per verificare quanti/quali risultati lo scroll ha caricato
+    senza aspettare l'intero scraping delle schede.
+    """
+    try:
+        out_dir = "debug"
+        os.makedirs(out_dir, exist_ok=True)
+        ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        comune_slug = _safe_filename(comune)
+        keyword_slug = _safe_filename(keyword)
+        filename = f"serp_names_{comune_slug}_{keyword_slug}_{ts}.csv"
+        path = os.path.join(out_dir, filename)
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.DictWriter(f, fieldnames=["index", "nome", "maps_href"])
+            writer.writeheader()
+            for i, entry in enumerate(place_urls, 1):
+                writer.writerow({
+                    "index": i,
+                    "nome": entry.get("name", ""),
+                    "maps_href": entry.get("href", ""),
+                })
+        logger.info(
+            f"[SERP dump] {len(place_urls)} nomi scritti in: {path}"
+        )
+        return path
+    except Exception as e:
+        logger.warning(f"[SERP dump] Errore scrittura CSV: {e}")
+        return ""
+
+
 def _looks_like_google_status_block(s: str, lang: str = "en") -> bool:
     s2 = (s or "").strip().lower()
     if not s2:
@@ -107,7 +141,6 @@ def _looks_like_address(s: str) -> bool:
         return False
     has_digit = any(ch.isdigit() for ch in s2)
     has_comma = "," in s2
-    # US ZIP (5 digits) or IT CAP (5 digits)
     has_cap = any(token.isdigit() and len(token) == 5 for token in s2.split())
     return has_digit and (has_comma or has_cap)
 
@@ -182,15 +215,6 @@ def _scroll_results_panel(
       1. Viene rilevato l'elemento di fine lista GMaps con testo riconoscibile.
       2. Il conteggio risultati rimane invariato per `stale_limit` scroll
          consecutivi DOPO attesa adattiva (fino a 2.5s per burst tardivi).
-
-    Modifiche rispetto alla versione precedente:
-      - stale_limit alzato da 3 a 6 per tollerare burst irregolari di GMaps.
-      - Attesa adattiva: dopo ogni scroll si aspetta fino a 2.5s che arrivino
-        nuovi elementi prima di contarli come "stale", invece di sleep fisso 0.7s.
-      - Il conteggio viene fatto PRIMA dello scroll (before_count) e confrontato
-        con quello DOPO l'attesa adattiva (after_count), eliminando race condition.
-      - Fallback scroll (pannello non trovato) usa 800px fisso invece di
-        400 + i*100 che cresceva fuori controllo.
     """
     END_OF_LIST_SELECTORS = [
         "div.HlvSq",
@@ -230,7 +254,6 @@ def _scroll_results_panel(
     stale_streak = 0
 
     for i in range(scroll_times):
-        # --- Segnale 1: elemento fine lista GMaps ---
         for end_sel in END_OF_LIST_SELECTORS:
             try:
                 end_els = driver.find_elements(By.CSS_SELECTOR, end_sel)
@@ -242,13 +265,11 @@ def _scroll_results_panel(
             except Exception:
                 continue
 
-        # --- Conta risultati PRIMA dello scroll ---
         try:
             before_count = len(driver.find_elements(By.CSS_SELECTOR, RESULT_SELECTOR))
         except Exception:
             before_count = 0
 
-        # --- Esegui lo scroll ---
         try:
             if panel:
                 driver.execute_script("arguments[0].scrollTop += 800;", panel)
@@ -264,7 +285,6 @@ def _scroll_results_panel(
         except Exception:
             break
 
-        # --- Attesa adattiva: aspetta fino a 2.5s che arrivino nuovi elementi ---
         adaptive_deadline = time.time() + 2.5
         after_count = before_count
         while time.time() < adaptive_deadline:
@@ -277,7 +297,6 @@ def _scroll_results_panel(
                 logger.debug(f"[Scroll] Nuovi elementi arrivati: {before_count} -> {after_count}")
                 break
 
-        # --- Segnale 2: stale check DOPO l'attesa adattiva ---
         if after_count > 0 and after_count == before_count:
             stale_streak += 1
             logger.debug(
@@ -318,28 +337,11 @@ def _extract_place_url_from_element(element) -> str:
 def _extract_num_recensioni(driver) -> int:
     """
     Legge il numero di recensioni dalla scheda Google Maps.
-
-    Strategia 0: JSON embedded nel page_source -- Google inietta i dati
-    della scheda come array JavaScript. Robusto anche in limited view
-    perche' i dati sono nel sorgente anche quando il DOM non li renderizza.
-
-    Strategia 1: aria-label su span/button del blocco stelle (robusto anche
-    con limited view, perche' l'attributo e' presente anche quando il testo
-    non viene renderizzato nel body).
-
-    Strategia 1b: selettori CSS specifici 2025/2026 per il blocco rating
-    visibile nella scheda place (div.F7nice, span.UY7F9, ecc.).
-
-    Strategia 2: fallback su body.text con regex.
     """
 
-    # ------------------------------------------------------------------ #
-    # Strategia 0: JSON embedded nel page_source                          #
-    # ------------------------------------------------------------------ #
     try:
         body_src = driver.page_source
 
-        # Pattern A: testo "X recensioni" o "X reviews" nel sorgente
         m = re.search(
             r'([0-9][0-9\.\,\s]{0,9})\n?(?:&nbsp;)?(?:recensioni?|reviews?)',
             body_src, re.IGNORECASE
@@ -350,7 +352,6 @@ def _extract_num_recensioni(driver) -> int:
                 logger.info(f"[Rec] trovate {n} da JSON embedded (pattern A)")
                 return n
 
-        # Pattern B: coppia (rating_float, n_recensioni) nel JSON array
         rating_positions = [m.start() for m in re.finditer(
             r'[,\[]\s*[1-5]\.[0-9]\s*,', body_src
         )]
@@ -366,9 +367,6 @@ def _extract_num_recensioni(driver) -> int:
     except Exception as e:
         logger.debug(f"[Rec] Strategia 0 fallita: {e}")
 
-    # ------------------------------------------------------------------ #
-    # Strategia 1: aria-label                                             #
-    # ------------------------------------------------------------------ #
     try:
         for sel in [
             "span[aria-label*='recension']",
@@ -388,9 +386,6 @@ def _extract_num_recensioni(driver) -> int:
     except Exception as e:
         logger.debug(f"[Rec] Metodo aria-label fallito: {e}")
 
-    # ------------------------------------------------------------------ #
-    # Strategia 1b: selettori CSS 2025/2026 blocco rating                 #
-    # ------------------------------------------------------------------ #
     try:
         for sel in [
             "div.F7nice",
@@ -425,9 +420,6 @@ def _extract_num_recensioni(driver) -> int:
     except Exception as e:
         logger.debug(f"[Rec] Strategia 1b fallita: {e}")
 
-    # ------------------------------------------------------------------ #
-    # Strategia 2: body text (fallback finale)                            #
-    # ------------------------------------------------------------------ #
     try:
         body_text = driver.find_element(By.TAG_NAME, "body").text
         matches = re.findall(
@@ -519,16 +511,6 @@ def _wait_for_authority_link(driver, timeout: int = 6) -> bool:
 
 
 def _navigate_to_place(driver, name: str, place_href: str, lang: str = "en"):
-    """
-    Naviga alla scheda Google Maps bypassando la 'limited view' per utenti
-    non loggati.
-
-    Strategia:
-    1. Warmup su google.com
-    2. Apertura via maps/search con parametri anti-limited-view
-    3. Click di un risultato dentro Maps per entrare nella scheda place
-    4. Fallback diretto solo come ultimissima risorsa
-    """
     cfg = _get_lang_cfg(lang)
     hl = cfg["hl"]
     gl = cfg["gl"]
@@ -578,7 +560,6 @@ def _navigate_to_place(driver, name: str, place_href: str, lang: str = "en"):
                         href = el.get_attribute("href") or ""
                         if "/maps/place/" not in href:
                             continue
-
                         driver.execute_script(
                             "arguments[0].scrollIntoView({block:'center'});", el
                         )
@@ -586,7 +567,6 @@ def _navigate_to_place(driver, name: str, place_href: str, lang: str = "en"):
                         driver.execute_script("arguments[0].click();", el)
                         logger.info(f"[Nav] Click risultato #{idx+1} con href: {href}")
                         time.sleep(4)
-
                         if "/maps/place/" in driver.current_url:
                             return True
                     except Exception as e:
@@ -598,7 +578,6 @@ def _navigate_to_place(driver, name: str, place_href: str, lang: str = "en"):
 
         return False
 
-    # 1) Warmup
     try:
         driver.get("https://www.google.com")
         time.sleep(2)
@@ -606,7 +585,6 @@ def _navigate_to_place(driver, name: str, place_href: str, lang: str = "en"):
     except Exception as e:
         logger.debug(f"[Nav] Warmup fallito: {e}")
 
-    # 2) Search navigation con parametri anti-limited-view
     name_encoded = quote_plus(name)
     search_url = (
         f"https://www.google.com/maps/search/{name_encoded}"
@@ -620,12 +598,10 @@ def _navigate_to_place(driver, name: str, place_href: str, lang: str = "en"):
     except Exception as e:
         logger.warning(f"[Nav] Search navigation fallita: {e}")
 
-    # 3) Se siamo gia' su una place page e vediamo segnali utili, bene cosi'
     if "/maps/place/" in driver.current_url and _has_review_signals():
         logger.info("[Nav] Place page valida gia' ottenuta via search")
         return
 
-    # 4) Se siamo nella search/lista, clicca un risultato interno a Maps
     if "/maps/place/" not in driver.current_url:
         logger.info("[Nav] Non siamo su una scheda place, provo click da lista risultati")
         clicked = _click_first_place_result()
@@ -636,7 +612,6 @@ def _navigate_to_place(driver, name: str, place_href: str, lang: str = "en"):
             logger.info("[Nav] Scheda place ottenuta cliccando dalla lista")
             return
 
-    # 5) Se siamo su place ma ancora senza segnali recensioni, attendi
     if "/maps/place/" in driver.current_url:
         logger.info("[Nav] Siamo su place page, attendo eventuale rendering tardivo")
         for _ in range(6):
@@ -645,7 +620,6 @@ def _navigate_to_place(driver, name: str, place_href: str, lang: str = "en"):
                 return
             time.sleep(1)
 
-    # 6) Fallback diretto solo come ultimissima risorsa
     logger.info("[Nav] Fallback finale su URL diretto")
     try:
         driver.get(place_href)
@@ -669,11 +643,6 @@ def scrape_with_selenium(
     lang: str = "en",
     debug_screenshot: bool = False,
 ):
-    """
-    Args:
-        lang: 'en' per mercato US/EN, 'it' per mercato italiano.
-                Controlla lingua browser, hl/gl URL e token sanitizer.
-    """
     cfg = _get_lang_cfg(lang)
     results = []
     seen_in_run: set = set()
@@ -803,6 +772,18 @@ def scrape_with_selenium(
                     except Exception:
                         pass
                 place_urls.append({"href": href, "name": name_candidate})
+
+            # ----------------------------------------------------------------
+            # SERP names dump — scritto subito dopo lo scroll, prima di
+            # navigare nelle singole schede. Utile per verificare quanti
+            # business ha caricato lo scroll senza aspettare l'intero run.
+            # File: debug/serp_names_<comune>_<keyword>_<ts>.csv
+            # ----------------------------------------------------------------
+            _dump_serp_names_csv(
+                place_urls,
+                comune=comune_attuale,
+                keyword=keyword,
+            )
 
             n_to_process = min(max_results, len(place_urls))
             for i in range(n_to_process):
