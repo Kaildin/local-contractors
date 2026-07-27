@@ -649,6 +649,7 @@ def scrape_with_selenium(
     scroll_times: int = 30,
     headless: bool = True,
     lang: str = "en",
+    debug_screenshot: bool = False,
 ):
     """
     Args:
@@ -733,6 +734,7 @@ def scrape_with_selenium(
                 scroll_times=scroll_times,
                 comune=comune_attuale,
                 keyword=keyword,
+                debug_screenshot=debug_screenshot,
             )
 
             selectors_to_try = [
