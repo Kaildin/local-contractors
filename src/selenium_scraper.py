@@ -172,19 +172,25 @@ def _scroll_results_panel(
     scroll_times: int = 30,
     comune: str = "",
     keyword: str = "",
-    stale_limit: int = 3,
+    stale_limit: int = 6,
     debug_screenshot: bool = False,
 ):
     """
-    Scrolla il pannello risultati Google Maps fino alla fine della lista,
-    fermandosi automaticamente quando:
-      1. Viene rilevato l'elemento di fine lista di GMaps (div.HlvSq / span.HlvSq)
-         con testo di fine lista riconosciuto (non su elementi vuoti).
-      2. Il numero di risultati nel DOM rimane invariato per `stale_limit`
-         scroll consecutivi (fallback robusto indipendente dai class name).
+    Scrolla il pannello risultati Google Maps fino alla fine della lista.
 
-    scroll_times: limite massimo di scroll come safety cap (default 30).
-    stale_limit:  quanti scroll senza nuovi risultati prima di fermarsi (default 3).
+    Si ferma quando:
+      1. Viene rilevato l'elemento di fine lista GMaps con testo riconoscibile.
+      2. Il conteggio risultati rimane invariato per `stale_limit` scroll
+         consecutivi DOPO attesa adattiva (fino a 2.5s per burst tardivi).
+
+    Modifiche rispetto alla versione precedente:
+      - stale_limit alzato da 3 a 6 per tollerare burst irregolari di GMaps.
+      - Attesa adattiva: dopo ogni scroll si aspetta fino a 2.5s che arrivino
+        nuovi elementi prima di contarli come "stale", invece di sleep fisso 0.7s.
+      - Il conteggio viene fatto PRIMA dello scroll (before_count) e confrontato
+        con quello DOPO l'attesa adattiva (after_count), eliminando race condition.
+      - Fallback scroll (pannello non trovato) usa 800px fisso invece di
+        400 + i*100 che cresceva fuori controllo.
     """
     END_OF_LIST_SELECTORS = [
         "div.HlvSq",
@@ -215,16 +221,16 @@ def _scroll_results_panel(
                 panel = els[0]
                 logger.debug(f"Pannello scroll trovato con: {sel}")
                 break
-        except:
+        except Exception:
             continue
 
-    prev_count = 0
+    if not panel:
+        logger.warning("[Scroll] Pannello laterale non trovato, uso scroll pagina (fallback).")
+
     stale_streak = 0
 
     for i in range(scroll_times):
         # --- Segnale 1: elemento fine lista GMaps ---
-        # Si ferma SOLO se l'elemento ha testo riconoscibile di fine lista.
-        # Elementi vuoti con la stessa classe vengono ignorati (falso positivo).
         for end_sel in END_OF_LIST_SELECTORS:
             try:
                 end_els = driver.find_elements(By.CSS_SELECTOR, end_sel)
@@ -233,36 +239,21 @@ def _scroll_results_panel(
                     if t and any(phrase in t for phrase in END_OF_LIST_TEXTS):
                         logger.info(f"[Scroll] Fine lista rilevata (selector) al passo {i + 1}")
                         return
-            except:
+            except Exception:
                 continue
 
-        # --- Segnale 2: conteggio risultati stabile (fallback) ---
+        # --- Conta risultati PRIMA dello scroll ---
         try:
-            current_count = len(driver.find_elements(By.CSS_SELECTOR, RESULT_SELECTOR))
-            if current_count > 0 and current_count == prev_count:
-                stale_streak += 1
-                logger.debug(
-                    f"[Scroll] Conteggio stabile ({current_count}) - streak {stale_streak}/{stale_limit}"
-                )
-                if stale_streak >= stale_limit:
-                    logger.info(
-                        f"[Scroll] Nessun nuovo risultato per {stale_limit} scroll consecutivi, stop."
-                    )
-                    return
-            else:
-                stale_streak = 0
-            prev_count = current_count
-        except:
-            pass
+            before_count = len(driver.find_elements(By.CSS_SELECTOR, RESULT_SELECTOR))
+        except Exception:
+            before_count = 0
 
         # --- Esegui lo scroll ---
         try:
             if panel:
                 driver.execute_script("arguments[0].scrollTop += 800;", panel)
             else:
-                logger.debug("Pannello laterale non trovato, uso scroll pagina")
-                driver.execute_script(f"window.scrollBy(0, {400 + i * 100});")
-            time.sleep(0.7)
+                driver.execute_script("window.scrollBy(0, 800);")
             if debug_screenshot:
                 _save_serp_screenshot(
                     driver,
@@ -270,8 +261,35 @@ def _scroll_results_panel(
                     keyword=keyword,
                     scroll_idx=i + 1,
                 )
-        except:
+        except Exception:
             break
+
+        # --- Attesa adattiva: aspetta fino a 2.5s che arrivino nuovi elementi ---
+        adaptive_deadline = time.time() + 2.5
+        after_count = before_count
+        while time.time() < adaptive_deadline:
+            time.sleep(0.4)
+            try:
+                after_count = len(driver.find_elements(By.CSS_SELECTOR, RESULT_SELECTOR))
+            except Exception:
+                break
+            if after_count > before_count:
+                logger.debug(f"[Scroll] Nuovi elementi arrivati: {before_count} -> {after_count}")
+                break
+
+        # --- Segnale 2: stale check DOPO l'attesa adattiva ---
+        if after_count > 0 and after_count == before_count:
+            stale_streak += 1
+            logger.debug(
+                f"[Scroll] Conteggio stabile ({after_count}) - streak {stale_streak}/{stale_limit}"
+            )
+            if stale_streak >= stale_limit:
+                logger.info(
+                    f"[Scroll] Nessun nuovo risultato per {stale_limit} scroll consecutivi, stop."
+                )
+                return
+        else:
+            stale_streak = 0
 
     logger.info(f"[Scroll] Raggiunto limite massimo scroll ({scroll_times}).")
 
@@ -437,7 +455,7 @@ def _get_h1(driver) -> str:
                 t = els[0].text.strip()
                 if t:
                     return t
-        except:
+        except Exception:
             continue
     return ""
 
@@ -694,7 +712,8 @@ def scrape_with_selenium(
                     if attempt < max_retries:
                         try:
                             if driver: driver.quit()
-                        except: pass
+                        except Exception:
+                            pass
                         driver = None
                         time.sleep(2)
                     else:
@@ -723,7 +742,7 @@ def scrape_with_selenium(
                     driver.execute_script("arguments[0].click();", consent_button)
                     time.sleep(1)
                     break
-                except:
+                except Exception:
                     continue
 
             time.sleep(2)
@@ -776,12 +795,12 @@ def scrape_with_selenium(
                             name_candidate = ne[0].text.strip()
                             if name_candidate:
                                 break
-                    except:
+                    except Exception:
                         continue
                 if not name_candidate:
                     try:
                         name_candidate = el.get_attribute("aria-label") or ""
-                    except:
+                    except Exception:
                         pass
                 place_urls.append({"href": href, "name": name_candidate})
 
@@ -863,7 +882,7 @@ def scrape_with_selenium(
                                     break
                             if address:
                                 break
-                    except:
+                    except Exception:
                         continue
 
                 phone_selectors = [
@@ -887,7 +906,7 @@ def scrape_with_selenium(
                                         break
                             if phone and re.search(r'\d', phone):
                                 break
-                    except:
+                    except Exception:
                         continue
 
                 _wait_for_authority_link(driver, timeout=6)
@@ -923,7 +942,7 @@ def scrape_with_selenium(
                                                 break
                             if website:
                                 break
-                    except:
+                    except Exception:
                         continue
 
                 if not website:
