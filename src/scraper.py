@@ -28,12 +28,12 @@ def _load_geocode_cache() -> dict:
     if path.exists():
         try:
             cache = json.loads(path.read_text(encoding="utf-8"))
-            logger.debug(f"[Geocode] Cache caricata: {len(cache)} città in cache.")
+            logger.debug(f"[Geocode] Cache caricata: {len(cache)} citt\u00e0 in cache.")
             return cache
         except Exception as e:
-            logger.warning(f"[Geocode] Errore lettura cache: {e} — ricomincio da zero.")
+            logger.warning(f"[Geocode] Errore lettura cache: {e} \u2014 ricomincio da zero.")
             return {}
-    logger.debug("[Geocode] Nessuna cache trovata, verrà creata al primo geocoding.")
+    logger.debug("[Geocode] Nessuna cache trovata, verr\u00e0 creata al primo geocoding.")
     return {}
 
 
@@ -46,15 +46,15 @@ def _save_geocode_cache(cache: dict):
 
 def geocode_city(city: str, state: str = "", cache: dict = None) -> tuple:
     """
-    Ritorna (lat, lng) per una città, usando cache locale per evitare
-    di ri-interrogare Nominatim su città già geocodificate.
+    Ritorna (lat, lng) per una citt\u00e0, usando cache locale per evitare
+    di ri-interrogare Nominatim su citt\u00e0 gi\u00e0 geocodificate.
     """
     cache = cache if cache is not None else _load_geocode_cache()
     key = f"{city.strip().lower()}|{state.strip().lower()}"
 
     if key in cache:
         coords = tuple(cache[key])
-        logger.info(f"[Geocode] ✓ Cache HIT per '{city}' ({state}): {coords}")
+        logger.info(f"[Geocode] \u2713 Cache HIT per '{city}' ({state}): {coords}")
         return coords
 
     logger.info(f"[Geocode] Interrogo Nominatim per '{city}' ({state})...")
@@ -66,12 +66,12 @@ def geocode_city(city: str, state: str = "", cache: dict = None) -> tuple:
 
     if location:
         coords = (location.latitude, location.longitude)
-        logger.info(f"[Geocode] ✓ Trovato: '{city}' ({state}) => {coords} (raw: '{location.address}')")
+        logger.info(f"[Geocode] \u2713 Trovato: '{city}' ({state}) => {coords} (raw: '{location.address}')")
         cache[key] = coords
         _save_geocode_cache(cache)
         return coords
 
-    logger.warning(f"[Geocode] ✗ Nominatim non ha trovato coordinate per '{city}' ({state}). Fallback a URL senza geofencing.")
+    logger.warning(f"[Geocode] \u2717 Nominatim non ha trovato coordinate per '{city}' ({state}). Fallback a URL senza geofencing.")
     return (None, None)
 
 
@@ -117,7 +117,7 @@ def build_search_urls(
 ) -> List[Dict[str, str]]:
     search_urls = []
     geocode_cache = _load_geocode_cache()
-    logger.info(f"[Geocode] Inizio geocoding per {len(cities)} città...")
+    logger.info(f"[Geocode] Inizio geocoding per {len(cities)} citt\u00e0...")
 
     for city in cities:
         lat, lng = geocode_city(city, state=state, cache=geocode_cache)
@@ -142,7 +142,7 @@ def build_search_urls(
             })
 
     geo_ok = sum(1 for c in cities if geocode_city(c, state=state, cache=geocode_cache) != (None, None))
-    logger.info(f"[Geocode] Geocoding completato: {geo_ok}/{len(cities)} città con coordinate.")
+    logger.info(f"[Geocode] Geocoding completato: {geo_ok}/{len(cities)} citt\u00e0 con coordinate.")
     return search_urls
 
 
@@ -166,21 +166,30 @@ def search_contractors(
 
     search_urls = build_search_urls([comune], keywords, lang=lang, state=state)
 
-    results_raw, driver = scrape_with_selenium(
-        search_urls,
-        driver=None,
-        max_results=max_results,
-        scroll_times=scroll_times,
-        headless=headless,
-        debug_screenshot=debug_screenshot,
-    )
-
-    if driver:
-        try:
-            driver.quit()
-        except Exception:
-            pass
-    cleanup_chrome_tmp()
+    driver = None
+    mon = None
+    try:
+        results_raw, driver, mon = scrape_with_selenium(
+            search_urls,
+            driver=None,
+            max_results=max_results,
+            scroll_times=scroll_times,
+            headless=headless,
+            debug_screenshot=debug_screenshot,
+        )
+    finally:
+        if mon:
+            mon.log_stats()
+            logger.info(
+                f"[ResourceMonitor] Peak RAM per '{comune}': {mon.peak_ram_mb():.1f} MB"
+            )
+            mon.stop()
+        if driver:
+            try:
+                driver.quit()
+            except Exception:
+                pass
+        cleanup_chrome_tmp()
 
     filtered = []
     for r in results_raw:

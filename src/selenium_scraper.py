@@ -646,15 +646,28 @@ def scrape_with_selenium(
     cfg = _get_lang_cfg(lang)
     results = []
     seen_in_run: set = set()
+    mon = None  # will be set on first driver init
+
+    def _init_driver_with_label(label: str = ""):
+        """Helper to init driver and keep mon in closure."""
+        nonlocal mon
+        _driver, _mon = init_driver(
+            headless=headless,
+            lang=cfg["lang"],
+            worker_label=label,
+        )
+        mon = _mon
+        return _driver
 
     if driver is None:
         logger.info("Driver non fornito, inizializzazione...")
+        first_label = search_urls[0]["comune"] if search_urls else ""
         try:
-            driver = init_driver(headless=headless, lang=cfg["lang"])
+            driver = _init_driver_with_label(first_label)
         except Exception as e:
             logger.error(f"Errore inizializzazione Chrome: {e}")
             try:
-                driver = init_driver(headless=False, lang=cfg["lang"])
+                driver, mon = init_driver(headless=False, lang=cfg["lang"], worker_label=first_label)
             except Exception as e2:
                 logger.critical(f"Impossibile avviare Chrome: {e2}")
                 raise
@@ -663,6 +676,7 @@ def scrape_with_selenium(
         comune_attuale = search['comune']
         keyword = search['keyword']
         url = search['url']
+        worker_label = f"{comune_attuale} | {keyword}"
 
         logger.info(f"Cercando: {keyword} in {comune_attuale} [lang={lang}]")
 
@@ -672,7 +686,7 @@ def scrape_with_selenium(
             for attempt in range(max_retries + 1):
                 try:
                     if driver is None:
-                        driver = init_driver(headless=headless, lang=cfg["lang"])
+                        driver = _init_driver_with_label(worker_label)
                     driver.get(url)
                     nav_success = True
                     break
@@ -680,11 +694,16 @@ def scrape_with_selenium(
                     logger.warning(f"Errore navigazione (tentativo {attempt+1}/{max_retries+1}): {e_nav}")
                     if attempt < max_retries:
                         try:
-                            if driver: driver.quit()
+                            if mon:
+                                mon.stop()
+                            if driver:
+                                driver.quit()
                         except Exception:
                             pass
                         driver = None
+                        mon = None
                         time.sleep(2)
+                        driver = _init_driver_with_label(worker_label)
                     else:
                         raise e_nav
 
@@ -751,6 +770,9 @@ def scrape_with_selenium(
 
             if not result_elements:
                 logger.warning(f"Nessun risultato trovato per {keyword} {comune_attuale}")
+                # Log resources even on empty results
+                if mon:
+                    mon.log_stats()
                 continue
 
             place_urls = []
@@ -774,10 +796,7 @@ def scrape_with_selenium(
                 place_urls.append({"href": href, "name": name_candidate})
 
             # ----------------------------------------------------------------
-            # SERP names dump — scritto subito dopo lo scroll, prima di
-            # navigare nelle singole schede. Utile per verificare quanti
-            # business ha caricato lo scroll senza aspettare l'intero run.
-            # File: debug/serp_names_<comune>_<keyword>_<ts>.csv
+            # SERP names dump
             # ----------------------------------------------------------------
             _dump_serp_names_csv(
                 place_urls,
@@ -946,10 +965,14 @@ def scrape_with_selenium(
                 results.append(result)
                 seen_in_run.add(run_key)
 
+            # Log resource stats at end of each search URL
+            if mon:
+                mon.log_stats()
+
             pause_time = random.uniform(3, 5)
             time.sleep(pause_time)
 
         except Exception as e:
             logger.error(f"Errore generale per {keyword} {comune_attuale}: {str(e)}")
 
-    return results, driver
+    return results, driver, mon
