@@ -1,8 +1,12 @@
+import json
 import logging
 import csv
 import os
 from pathlib import Path
 from typing import List, Dict, Any, Optional
+
+from geopy.geocoders import Nominatim
+from geopy.extra.rate_limiter import RateLimiter
 
 from .selenium_scraper import scrape_with_selenium
 from .website_checker import get_website_status, website_is_real
@@ -15,6 +19,50 @@ CSV_FIELDNAMES = [
     "sito_web", "ha_sito_web", "website_status_code", "website_check_reason",
     "num_recensioni", "maps_url",
 ]
+
+_GEOCODE_CACHE_PATH = "debug/geocode_cache.json"
+
+
+def _load_geocode_cache() -> dict:
+    path = Path(_GEOCODE_CACHE_PATH)
+    if path.exists():
+        try:
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+    return {}
+
+
+def _save_geocode_cache(cache: dict):
+    path = Path(_GEOCODE_CACHE_PATH)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(cache, indent=2), encoding="utf-8")
+
+
+def geocode_city(city: str, state: str = "", cache: dict = None) -> tuple:
+    """
+    Ritorna (lat, lng) per una città, usando cache locale per evitare
+    di ri-interrogare Nominatim su città già geocodificate.
+    """
+    cache = cache if cache is not None else _load_geocode_cache()
+    key = f"{city.strip().lower()}|{state.strip().lower()}"
+
+    if key in cache:
+        return tuple(cache[key])
+
+    geolocator = Nominatim(user_agent="local-contractors-scraper")
+    geocode = RateLimiter(geolocator.geocode, min_delay_seconds=1)
+
+    query = f"{city}, {state}" if state else city
+    location = geocode(query)
+
+    if location:
+        coords = (location.latitude, location.longitude)
+        cache[key] = coords
+        _save_geocode_cache(cache)
+        return coords
+
+    return (None, None)
 
 
 def _load_already_scraped(output_csv: str) -> set:
@@ -55,19 +103,32 @@ def build_search_urls(
     keywords: List[str],
     lang: str = "en",
     state: str = "",
+    zoom: int = 12,
 ) -> List[Dict[str, str]]:
     search_urls = []
+    geocode_cache = _load_geocode_cache()
+
     for city in cities:
+        lat, lng = geocode_city(city, state=state, cache=geocode_cache)
+
         for keyword in keywords:
-            if state:
-                query = f"{keyword} {city} {state}".replace(" ", "+")
+            query = f"{keyword} {city}".replace(" ", "+")
+
+            if lat is not None and lng is not None:
+                url = (
+                    f"https://www.google.com/maps/search/{query}"
+                    f"/@{lat},{lng},{zoom}z/?hl={lang}&gl={'US' if lang == 'en' else 'IT'}"
+                )
             else:
-                query = f"{keyword} {city}".replace(" ", "+")
+                logger.warning(f"[Geocode] Coordinate non trovate per '{city}', uso URL senza geofencing.")
+                url = f"https://www.google.com/maps/search/{query}?hl={lang}&gl={'US' if lang == 'en' else 'IT'}"
+
             search_urls.append({
                 "comune": city,
                 "keyword": keyword,
-                "url": f"https://www.google.com/maps/search/{query}?hl={lang}&gl={'US' if lang == 'en' else 'IT'}",
+                "url": url,
             })
+
     return search_urls
 
 
