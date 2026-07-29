@@ -27,9 +27,13 @@ def _load_geocode_cache() -> dict:
     path = Path(_GEOCODE_CACHE_PATH)
     if path.exists():
         try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except Exception:
+            cache = json.loads(path.read_text(encoding="utf-8"))
+            logger.debug(f"[Geocode] Cache caricata: {len(cache)} città in cache.")
+            return cache
+        except Exception as e:
+            logger.warning(f"[Geocode] Errore lettura cache: {e} — ricomincio da zero.")
             return {}
+    logger.debug("[Geocode] Nessuna cache trovata, verrà creata al primo geocoding.")
     return {}
 
 
@@ -37,6 +41,7 @@ def _save_geocode_cache(cache: dict):
     path = Path(_GEOCODE_CACHE_PATH)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(cache, indent=2), encoding="utf-8")
+    logger.debug(f"[Geocode] Cache salvata: {len(cache)} voci totali.")
 
 
 def geocode_city(city: str, state: str = "", cache: dict = None) -> tuple:
@@ -48,8 +53,11 @@ def geocode_city(city: str, state: str = "", cache: dict = None) -> tuple:
     key = f"{city.strip().lower()}|{state.strip().lower()}"
 
     if key in cache:
-        return tuple(cache[key])
+        coords = tuple(cache[key])
+        logger.info(f"[Geocode] ✓ Cache HIT per '{city}' ({state}): {coords}")
+        return coords
 
+    logger.info(f"[Geocode] Interrogo Nominatim per '{city}' ({state})...")
     geolocator = Nominatim(user_agent="local-contractors-scraper")
     geocode = RateLimiter(geolocator.geocode, min_delay_seconds=1)
 
@@ -58,10 +66,12 @@ def geocode_city(city: str, state: str = "", cache: dict = None) -> tuple:
 
     if location:
         coords = (location.latitude, location.longitude)
+        logger.info(f"[Geocode] ✓ Trovato: '{city}' ({state}) => {coords} (raw: '{location.address}')")
         cache[key] = coords
         _save_geocode_cache(cache)
         return coords
 
+    logger.warning(f"[Geocode] ✗ Nominatim non ha trovato coordinate per '{city}' ({state}). Fallback a URL senza geofencing.")
     return (None, None)
 
 
@@ -107,6 +117,7 @@ def build_search_urls(
 ) -> List[Dict[str, str]]:
     search_urls = []
     geocode_cache = _load_geocode_cache()
+    logger.info(f"[Geocode] Inizio geocoding per {len(cities)} città...")
 
     for city in cities:
         lat, lng = geocode_city(city, state=state, cache=geocode_cache)
@@ -119,9 +130,10 @@ def build_search_urls(
                     f"https://www.google.com/maps/search/{query}"
                     f"/@{lat},{lng},{zoom}z/?hl={lang}&gl={'US' if lang == 'en' else 'IT'}"
                 )
+                logger.debug(f"[Geocode] URL geofenced per '{city}' + '{keyword}': {url}")
             else:
-                logger.warning(f"[Geocode] Coordinate non trovate per '{city}', uso URL senza geofencing.")
                 url = f"https://www.google.com/maps/search/{query}?hl={lang}&gl={'US' if lang == 'en' else 'IT'}"
+                logger.debug(f"[Geocode] URL fallback per '{city}' + '{keyword}': {url}")
 
             search_urls.append({
                 "comune": city,
@@ -129,6 +141,8 @@ def build_search_urls(
                 "url": url,
             })
 
+    geo_ok = sum(1 for c in cities if geocode_city(c, state=state, cache=geocode_cache) != (None, None))
+    logger.info(f"[Geocode] Geocoding completato: {geo_ok}/{len(cities)} città con coordinate.")
     return search_urls
 
 
