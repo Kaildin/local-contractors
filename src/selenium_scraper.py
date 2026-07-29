@@ -534,9 +534,13 @@ def _navigate_to_place(driver, name: str, place_href: str, lang: str = "en"):
         ]
         for sel in review_selectors:
             try:
+                # NOTE: is_displayed() is intentionally NOT used here.
+                # On Linux headless without a GPU compositor, elements exist
+                # in the DOM but report is_displayed()=False even when fully
+                # loaded. Checking presence alone is sufficient and consistent
+                # across platforms.
                 els = driver.find_elements(By.CSS_SELECTOR, sel)
-                visible = [e for e in els if e.is_displayed()]
-                if visible:
+                if els:
                     logger.info(f"[Nav] Segnale recensioni trovato con selector: {sel}")
                     return True
             except Exception:
@@ -770,7 +774,6 @@ def scrape_with_selenium(
 
             if not result_elements:
                 logger.warning(f"Nessun risultato trovato per {keyword} {comune_attuale}")
-                # Log resources even on empty results
                 if mon:
                     mon.log_stats()
                 continue
@@ -795,9 +798,6 @@ def scrape_with_selenium(
                         pass
                 place_urls.append({"href": href, "name": name_candidate})
 
-            # ----------------------------------------------------------------
-            # SERP names dump
-            # ----------------------------------------------------------------
             _dump_serp_names_csv(
                 place_urls,
                 comune=comune_attuale,
@@ -839,14 +839,20 @@ def scrape_with_selenium(
 
                 maps_url = driver.current_url
 
+                # Raised from 8s to 15s — Linux headless SW rendering is
+                # significantly slower than macOS GPU rendering. Log a warning
+                # instead of silently passing so slow pages are visible in logs.
                 try:
-                    WebDriverWait(driver, 8).until(
+                    WebDriverWait(driver, 15).until(
                         EC.presence_of_element_located((By.CSS_SELECTOR,
                             "span[aria-label*='recension'], "
                             "span[aria-label*='review'], "
                             "div.F7nice")))
                 except Exception:
-                    pass
+                    logger.warning(
+                        f"[Wait] Timeout attesa elementi recensioni per '{name}' "
+                        f"— procedo comunque con page_source"
+                    )
 
                 num_recensioni = _extract_num_recensioni(driver)
                 logger.info(f"Recensioni rilevate per {name}: {num_recensioni}")
@@ -965,7 +971,6 @@ def scrape_with_selenium(
                 results.append(result)
                 seen_in_run.add(run_key)
 
-            # Log resource stats at end of each search URL
             if mon:
                 mon.log_stats()
 

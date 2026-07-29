@@ -1,5 +1,6 @@
 import logging
 import os
+import platform
 import shutil
 import subprocess
 import re
@@ -16,6 +17,47 @@ from src.resource_monitor import ChromeResourceMonitor
 
 logger = logging.getLogger(__name__)
 
+_IS_LINUX = platform.system() == "Linux"
+
+
+def _apply_headless_flags(options, is_linux: bool) -> None:
+    """
+    Applica i flag headless corretti in base alla piattaforma.
+
+    macOS / Windows
+    ---------------
+    --headless=new e' sufficiente; il GPU backend nativo (Metal / ANGLE)
+    gestisce il rendering anche senza display.
+
+    Linux
+    -----
+    Chrome non ha GPU hardware disponibile, quindi:
+    - --use-gl=swiftshader  abilita il renderer software (SwiftShader)
+      in modo esplicito, senza disabilitarlo come faceva
+      --disable-software-rasterizer.
+    - --disable-gpu e' ancora necessario per evitare che Chrome tenti
+      di usare un GPU driver assente e vada in crash.
+    - --run-all-compositor-stages-before-draw assicura che il DOM sia
+      completamente dipinto prima che Selenium legga page_source o
+      cerchi elementi — critico per Google Maps che e' una SPA
+      WebGL/canvas.
+    - --disable-features=VizDisplayCompositor previene il crash del
+      processo GPU su sistemi senza display server.
+    - --force-device-scale-factor=1 normalizza il DPI virtuale
+      (su macOS e' 2x per Retina, su Linux headless e' variabile).
+    """
+    options.add_argument("--headless=new")
+    options.add_argument("--disable-gpu")
+
+    if is_linux:
+        options.add_argument("--use-gl=swiftshader")
+        options.add_argument("--run-all-compositor-stages-before-draw")
+        options.add_argument("--disable-features=VizDisplayCompositor")
+        options.add_argument("--force-device-scale-factor=1")
+    # NOTE: --disable-software-rasterizer is intentionally NOT added.
+    # On Linux it would kill the only available renderer (SwiftShader),
+    # leaving Chrome with no compositor and causing Maps to render blank.
+
 
 def init_driver(
     headless: bool = True,
@@ -23,7 +65,7 @@ def init_driver(
     monitor: bool = True,
     monitor_interval: float = 5.0,
     worker_label: str = "",
-) -> Tuple[webdriver.Chrome, ChromeResourceMonitor]:
+) -> Tuple[webdriver.Chrome, "ChromeResourceMonitor"]:
     """Inizializza Chrome con auto-detection della versione installata.
 
     Args:
@@ -36,9 +78,12 @@ def init_driver(
 
     Returns:
         Tuple (driver, monitor). Se monitor=False, il secondo elemento e'
-        un ChromeResourceMonitor non avviato con pid=-1 (inerte).
+        un _NullMonitor inerte.
     """
-    logger.info(f"Inizializzazione driver Chrome (headless={headless}, lang={lang})...")
+    logger.info(
+        f"Inizializzazione driver Chrome "
+        f"(headless={headless}, lang={lang}, platform={platform.system()})..."
+    )
 
     chromium_paths = [
         "/usr/bin/google-chrome",
@@ -77,32 +122,37 @@ def init_driver(
         except Exception as e:
             logger.warning(f"Impossibile rilevare versione Chrome: {e}")
 
+    # Shared non-GPU flags (applied on both platforms)
+    _COMMON_FLAGS = [
+        "--no-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-extensions",
+        "--disable-logging",
+        "--log-level=3",
+        "--disable-setuid-sandbox",
+        "--disable-background-networking",
+        "--disable-backgrounding-occluded-windows",
+        "--disable-breakpad",
+        "--disable-features=TranslateUI",
+        "--disable-ipc-flooding-protection",
+        "--disable-renderer-backgrounding",
+        "--disable-sync",
+        "--mute-audio",
+        "--no-first-run",
+        # 1920x1080 — Maps needs sufficient height to render the review block
+        "--window-size=1920,1080",
+        f"--lang={lang}",
+    ]
+
     driver = None
     try:
         uc_options = uc.ChromeOptions()
         if headless:
-            uc_options.add_argument("--headless=new")
-            uc_options.add_argument("--disable-gpu")
-            uc_options.add_argument("--disable-software-rasterizer")
+            _apply_headless_flags(uc_options, _IS_LINUX)
         else:
             uc_options.add_argument("--window-position=0,0")
-        uc_options.add_argument("--no-sandbox")
-        uc_options.add_argument("--disable-dev-shm-usage")
-        uc_options.add_argument("--disable-extensions")
-        uc_options.add_argument("--disable-logging")
-        uc_options.add_argument("--log-level=3")
-        uc_options.add_argument("--disable-setuid-sandbox")
-        uc_options.add_argument("--disable-background-networking")
-        uc_options.add_argument("--disable-backgrounding-occluded-windows")
-        uc_options.add_argument("--disable-breakpad")
-        uc_options.add_argument("--disable-features=TranslateUI")
-        uc_options.add_argument("--disable-ipc-flooding-protection")
-        uc_options.add_argument("--disable-renderer-backgrounding")
-        uc_options.add_argument("--disable-sync")
-        uc_options.add_argument("--mute-audio")
-        uc_options.add_argument("--no-first-run")
-        uc_options.add_argument(f"--lang={lang}")
-        uc_options.add_argument("--window-size=1280,900")
+        for flag in _COMMON_FLAGS:
+            uc_options.add_argument(flag)
         if chromium_binary:
             uc_options.binary_location = chromium_binary
 
@@ -119,30 +169,13 @@ def init_driver(
     if driver is None:
         chrome_options = Options()
         if headless:
-            chrome_options.add_argument("--headless=new")
-            chrome_options.add_argument("--disable-gpu")
-            chrome_options.add_argument("--disable-software-rasterizer")
+            _apply_headless_flags(chrome_options, _IS_LINUX)
         else:
             chrome_options.add_argument("--window-position=0,0")
-        chrome_options.add_argument("--no-sandbox")
-        chrome_options.add_argument("--disable-dev-shm-usage")
-        chrome_options.add_argument("--disable-extensions")
-        chrome_options.add_argument("--disable-logging")
-        chrome_options.add_argument("--log-level=3")
+        for flag in _COMMON_FLAGS:
+            chrome_options.add_argument(flag)
         chrome_options.add_argument("--remote-debugging-port=9222")
-        chrome_options.add_argument("--disable-setuid-sandbox")
-        chrome_options.add_argument("--disable-background-networking")
-        chrome_options.add_argument("--disable-backgrounding-occluded-windows")
-        chrome_options.add_argument("--disable-breakpad")
-        chrome_options.add_argument("--disable-features=TranslateUI")
-        chrome_options.add_argument("--disable-ipc-flooding-protection")
-        chrome_options.add_argument("--disable-renderer-backgrounding")
-        chrome_options.add_argument("--disable-sync")
-        chrome_options.add_argument("--mute-audio")
-        chrome_options.add_argument("--no-first-run")
         chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-        chrome_options.add_argument(f"--lang={lang}")
-        chrome_options.add_argument("--window-size=1280,900")
         chrome_options.add_argument(
             "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
@@ -173,7 +206,6 @@ def init_driver(
         )
         if monitor:
             mon.start()
-            # Snapshot iniziale (attende ~0.5 s per la CPU)
             snap = mon.snapshot()
             if snap:
                 logger.info(
@@ -182,7 +214,6 @@ def init_driver(
                 )
     except Exception as e:
         logger.warning(f"[ResourceMonitor] Impossibile avviare il monitor: {e}")
-        # Crea un monitor inerte per non rompere il return type
         mon = _NullMonitor()  # type: ignore[assignment]
 
     return driver, mon
