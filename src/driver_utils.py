@@ -3,6 +3,7 @@ import os
 import shutil
 import subprocess
 import re
+from typing import Tuple
 
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
@@ -11,15 +12,31 @@ from webdriver_manager.chrome import ChromeDriverManager
 from webdriver_manager.core.os_manager import ChromeType
 import undetected_chromedriver as uc
 
+from src.resource_monitor import ChromeResourceMonitor
+
 logger = logging.getLogger(__name__)
 
 
-def init_driver(headless: bool = True, lang: str = "en-US,en"):
+def init_driver(
+    headless: bool = True,
+    lang: str = "en-US,en",
+    monitor: bool = True,
+    monitor_interval: float = 5.0,
+    worker_label: str = "",
+) -> Tuple[webdriver.Chrome, ChromeResourceMonitor]:
     """Inizializza Chrome con auto-detection della versione installata.
 
     Args:
         headless: avvia Chrome in modalita' headless se True.
         lang: stringa lingua da passare a --lang (es. 'en-US,en' oppure 'it-IT,it').
+        monitor: se True, avvia il ChromeResourceMonitor sul driver creato.
+        monitor_interval: intervallo in secondi tra i campionamenti in background.
+        worker_label: etichetta opzionale mostrata nei log del monitor
+            (es. 'worker-3' o il nome della citta' corrente).
+
+    Returns:
+        Tuple (driver, monitor). Se monitor=False, il secondo elemento e'
+        un ChromeResourceMonitor non avviato con pid=-1 (inerte).
     """
     logger.info(f"Inizializzazione driver Chrome (headless={headless}, lang={lang})...")
 
@@ -60,6 +77,7 @@ def init_driver(headless: bool = True, lang: str = "en-US,en"):
         except Exception as e:
             logger.warning(f"Impossibile rilevare versione Chrome: {e}")
 
+    driver = None
     try:
         uc_options = uc.ChromeOptions()
         if headless:
@@ -95,57 +113,101 @@ def init_driver(headless: bool = True, lang: str = "en-US,en"):
             suppress_welcome=True,
         )
         logger.info("Chrome avviato con undetected_chromedriver")
-        return driver
     except Exception as uc_error:
         logger.warning(f"undetected_chromedriver fallito: {uc_error} — provo ChromeDriverManager...")
 
-    chrome_options = Options()
-    if headless:
-        chrome_options.add_argument("--headless=new")
-        chrome_options.add_argument("--disable-gpu")
-        chrome_options.add_argument("--disable-software-rasterizer")
-    else:
-        chrome_options.add_argument("--window-position=0,0")
-    chrome_options.add_argument("--no-sandbox")
-    chrome_options.add_argument("--disable-dev-shm-usage")
-    chrome_options.add_argument("--disable-extensions")
-    chrome_options.add_argument("--disable-logging")
-    chrome_options.add_argument("--log-level=3")
-    chrome_options.add_argument("--remote-debugging-port=9222")
-    chrome_options.add_argument("--disable-setuid-sandbox")
-    chrome_options.add_argument("--disable-background-networking")
-    chrome_options.add_argument("--disable-backgrounding-occluded-windows")
-    chrome_options.add_argument("--disable-breakpad")
-    chrome_options.add_argument("--disable-features=TranslateUI")
-    chrome_options.add_argument("--disable-ipc-flooding-protection")
-    chrome_options.add_argument("--disable-renderer-backgrounding")
-    chrome_options.add_argument("--disable-sync")
-    chrome_options.add_argument("--mute-audio")
-    chrome_options.add_argument("--no-first-run")
-    chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-    chrome_options.add_argument(f"--lang={lang}")
-    chrome_options.add_argument("--window-size=1280,900")
-    chrome_options.add_argument(
-        "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    )
-    if chromium_binary:
-        chrome_options.binary_location = chromium_binary
+    if driver is None:
+        chrome_options = Options()
+        if headless:
+            chrome_options.add_argument("--headless=new")
+            chrome_options.add_argument("--disable-gpu")
+            chrome_options.add_argument("--disable-software-rasterizer")
+        else:
+            chrome_options.add_argument("--window-position=0,0")
+        chrome_options.add_argument("--no-sandbox")
+        chrome_options.add_argument("--disable-dev-shm-usage")
+        chrome_options.add_argument("--disable-extensions")
+        chrome_options.add_argument("--disable-logging")
+        chrome_options.add_argument("--log-level=3")
+        chrome_options.add_argument("--remote-debugging-port=9222")
+        chrome_options.add_argument("--disable-setuid-sandbox")
+        chrome_options.add_argument("--disable-background-networking")
+        chrome_options.add_argument("--disable-backgrounding-occluded-windows")
+        chrome_options.add_argument("--disable-breakpad")
+        chrome_options.add_argument("--disable-features=TranslateUI")
+        chrome_options.add_argument("--disable-ipc-flooding-protection")
+        chrome_options.add_argument("--disable-renderer-backgrounding")
+        chrome_options.add_argument("--disable-sync")
+        chrome_options.add_argument("--mute-audio")
+        chrome_options.add_argument("--no-first-run")
+        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
+        chrome_options.add_argument(f"--lang={lang}")
+        chrome_options.add_argument("--window-size=1280,900")
+        chrome_options.add_argument(
+            "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        )
+        if chromium_binary:
+            chrome_options.binary_location = chromium_binary
 
-    is_chromium = "chromium" in (chromium_binary or "").lower()
-    # FIX: passa driver_version esplicitamente per evitare mismatch ChromeDriver/Chrome
-    service = webdriver.ChromeService(
-        ChromeDriverManager(
-            chrome_type=ChromeType.CHROMIUM if is_chromium else ChromeType.GOOGLE,
-            driver_version=str(chromium_version_int) if chromium_version_int else None,
-        ).install()
-    )
-    driver = webdriver.Chrome(service=service, options=chrome_options)
-    driver.execute_script(
-        "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-    )
-    logger.info("Chrome avviato con ChromeDriverManager")
-    return driver
+        is_chromium = "chromium" in (chromium_binary or "").lower()
+        service = webdriver.ChromeService(
+            ChromeDriverManager(
+                chrome_type=ChromeType.CHROMIUM if is_chromium else ChromeType.GOOGLE,
+                driver_version=str(chromium_version_int) if chromium_version_int else None,
+            ).install()
+        )
+        driver = webdriver.Chrome(service=service, options=chrome_options)
+        driver.execute_script(
+            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
+        )
+        logger.info("Chrome avviato con ChromeDriverManager")
+
+    # --- Resource monitor ---------------------------------------------------
+    try:
+        driver_pid = driver.service.process.pid
+        mon = ChromeResourceMonitor(
+            driver_pid=driver_pid,
+            sample_interval=monitor_interval,
+            worker_label=worker_label,
+        )
+        if monitor:
+            mon.start()
+            # Snapshot iniziale (attende ~0.5 s per la CPU)
+            snap = mon.snapshot()
+            if snap:
+                logger.info(
+                    f"[ResourceMonitor] Driver avviato — {snap} "
+                    f"(label={worker_label or 'n/a'})"
+                )
+    except Exception as e:
+        logger.warning(f"[ResourceMonitor] Impossibile avviare il monitor: {e}")
+        # Crea un monitor inerte per non rompere il return type
+        mon = _NullMonitor()  # type: ignore[assignment]
+
+    return driver, mon
+
+
+class _NullMonitor:
+    """Drop-in replacement when monitoring is unavailable or disabled."""
+
+    def start(self) -> "_NullMonitor":
+        return self
+
+    def stop(self) -> None:
+        pass
+
+    def snapshot(self):
+        return None
+
+    def last_snapshot(self):
+        return None
+
+    def peak_ram_mb(self) -> float:
+        return 0.0
+
+    def log_stats(self, level: int = logging.INFO) -> None:
+        pass
 
 
 def cleanup_chrome_tmp():
