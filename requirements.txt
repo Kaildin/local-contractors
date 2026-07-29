@@ -6,4 +6,4 @@ webdriver-manager>=3.8.0
 undetected-chromedriver>=3.5.0
 requests>=2.25.1
 PyQt5
-
+geopy

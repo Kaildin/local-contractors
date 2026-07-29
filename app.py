@@ -233,11 +233,11 @@ class CommonParams(QWidget):
         g.addWidget(section_label("Scraper"), row, 0, 1, 4); row += 1
 
         g.addWidget(lbl("Scroll times"), row, 0)
-        self.scroll_times = QSpinBox(); self.scroll_times.setRange(1, 200); self.scroll_times.setValue(30)
+        self.scroll_times = QSpinBox(); self.scroll_times.setRange(1, 999); self.scroll_times.setValue(30)
         g.addWidget(self.scroll_times, row, 1)
 
         g.addWidget(lbl("Max results"), row, 2)
-        self.max_results = QSpinBox(); self.max_results.setRange(0, 200); self.max_results.setValue(20)
+        self.max_results = QSpinBox(); self.max_results.setRange(0, 999); self.max_results.setValue(20)
         self.max_results.setSpecialValueText("auto")
         g.addWidget(self.max_results, row, 3); row += 1
 
