@@ -146,6 +146,32 @@ def build_search_urls(
     return search_urls
 
 
+def get_max_results(popolazione: int, lang: str = "en") -> int:
+    """
+    Adatta max_results alla dimensione della citta'.
+    Esportata qui (invece che solo in run_batch.py) in modo che
+    parallel_worker.py possa importarla senza dipendere dal modulo CLI.
+    """
+    if lang == "en":  # US
+        if popolazione < 50_000:
+            return 20
+        elif popolazione < 250_000:
+            return 30
+        elif popolazione < 1_000_000:
+            return 40
+        else:
+            return 50
+    else:  # IT
+        if popolazione < 5_000:
+            return 10
+        elif popolazione < 20_000:
+            return 20
+        elif popolazione < 100_000:
+            return 30
+        else:
+            return 50
+
+
 def search_contractors(
     comune: str,
     keywords: List[str],
