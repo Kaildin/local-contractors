@@ -392,7 +392,7 @@ class BatchTab(QWidget):
         top.setSpacing(12)
 
         # left params
-        left_box = QGroupBox("Batch run  —  run_batch.py")
+        self._left_box = QGroupBox("Batch run  —  run_batch.py  [Serial]")  # title updated dynamically
         left_g = QVBoxLayout()
 
         # input CSV
@@ -415,8 +415,27 @@ class BatchTab(QWidget):
         self.state = QLineEdit(); self.state.setPlaceholderText("TX  /  lascia vuoto = tutti")
         r2.addWidget(self.state)
 
+        # ── parallel workers ──────────────────────────────────────
+        workers_box = QGroupBox("Parallel workers")
+        wg = QHBoxLayout()
+        wg.addWidget(lbl("Workers"))
+        self.workers = QSpinBox()
+        self.workers.setRange(1, 16)
+        self.workers.setValue(1)
+        self.workers.setToolTip(
+            "1 = serial (default, backward-compatible).\n"
+            "2+ = parallel: N Chrome processes run concurrently,\n"
+            "each handling its own city chunk.\n"
+            "Suggested: 2-3. Each Chrome uses ~300-500 MB RAM."
+        )
+        wg.addWidget(self.workers)
+        wg.addWidget(lbl("(1 = serial, 2-3 recommended for parallel)"))
+        wg.addStretch()
+        workers_box.setLayout(wg)
+        self.workers.valueChanged.connect(self._on_workers_changed)
+
         # pause
-        pause_box = QGroupBox("Anti-ban pause (seconds)")
+        self._pause_box = QGroupBox("Anti-ban pause (seconds)  [serial mode only]")
         pg = QHBoxLayout()
         pg.addWidget(lbl("Min"))
         self.pause_min = QDoubleSpinBox(); self.pause_min.setRange(0, 300); self.pause_min.setValue(5.0); self.pause_min.setSingleStep(0.5)
@@ -424,7 +443,7 @@ class BatchTab(QWidget):
         pg.addWidget(lbl("Max"))
         self.pause_max = QDoubleSpinBox(); self.pause_max.setRange(0, 300); self.pause_max.setValue(15.0); self.pause_max.setSingleStep(0.5)
         pg.addWidget(self.pause_max)
-        pause_box.setLayout(pg)
+        self._pause_box.setLayout(pg)
 
         self.common = CommonParams()
         self.common.max_reviews.setValue(100)
@@ -434,14 +453,15 @@ class BatchTab(QWidget):
         left_g.addLayout(r0)
         left_g.addLayout(r1)
         left_g.addLayout(r2)
-        left_g.addWidget(pause_box)
+        left_g.addWidget(workers_box)
+        left_g.addWidget(self._pause_box)
         left_g.addWidget(self.common)
         left_g.addStretch()
-        left_box.setLayout(left_g)
+        self._left_box.setLayout(left_g)
 
         self.niches = NicheSelector()
 
-        top.addWidget(left_box, 3)
+        top.addWidget(self._left_box, 3)
         top.addWidget(self.niches, 2)
 
         # buttons
@@ -465,6 +485,16 @@ class BatchTab(QWidget):
         self.btn_stop.clicked.connect(self._stop)
         self._runner = None
 
+    # ── dynamic UI update based on workers value ──────────────────
+    def _on_workers_changed(self, value: int):
+        parallel = value > 1
+        # grey out pause controls (irrelevant in parallel mode)
+        self.pause_min.setEnabled(not parallel)
+        self.pause_max.setEnabled(not parallel)
+        # update group box title to reflect current mode
+        mode_label = f"Parallel ({value} workers)" if parallel else "Serial"
+        self._left_box.setTitle(f"Batch run  —  run_batch.py  [{mode_label}]")
+
     def _browse_in(self):
         path, _ = QFileDialog.getOpenFileName(self, "Input CSV", "", "CSV (*.csv)")
         if path: self.input_csv.setText(path)
@@ -480,7 +510,9 @@ class BatchTab(QWidget):
             return None, "Seleziona almeno una nicchia."
         inp = self.input_csv.text().strip()
         if not inp:
-            return None, "Specifica il CSV delle città."
+            return None, "Specifica il CSV delle citta'."
+
+        workers = self.workers.value()
 
         cmd = [sys.executable, "run_batch.py",
                "--input", inp,
@@ -491,8 +523,6 @@ class BatchTab(QWidget):
                "--lang", c.lang.currentText(),
                "--log-level", c.log_level.currentText(),
                "--output", self.output.text().strip() or "output/batch_results.csv",
-               "--pause-min", str(self.pause_min.value()),
-               "--pause-max", str(self.pause_max.value()),
         ]
         if c.max_results.value() > 0:
             cmd += ["--max-results", str(c.max_results.value())]
@@ -500,7 +530,17 @@ class BatchTab(QWidget):
         if state: cmd += ["--state", state]
         if c.headless.isChecked():         cmd.append("--headless")
         if c.no_http_check.isChecked():    cmd.append("--no-http-check")
-        if c.debug_screenshot.isChecked(): cmd.append("--debug-screenshot")
+        if c.debug_screenshot.isChecked():
+            cmd.append("--debug-screenshot")
+        # parallel: inject --workers only when > 1 (serial is the default)
+        if workers > 1:
+            cmd += ["--workers", str(workers)]
+        else:
+            # serial mode: include pause controls
+            cmd += [
+                "--pause-min", str(self.pause_min.value()),
+                "--pause-max", str(self.pause_max.value()),
+            ]
         return cmd, None
 
     def _start(self):
