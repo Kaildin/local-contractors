@@ -41,10 +41,14 @@ def _apply_headless_flags(options, is_linux: bool) -> None:
       completamente dipinto prima che Selenium legga page_source o
       cerchi elementi — critico per Google Maps che e' una SPA
       WebGL/canvas.
-    - --disable-features=VizDisplayCompositor previene il crash del
-      processo GPU su sistemi senza display server.
     - --force-device-scale-factor=1 normalizza il DPI virtuale
       (su macOS e' 2x per Retina, su Linux headless e' variabile).
+
+    NOTE: --disable-features=VizDisplayCompositor is intentionally NOT used.
+    VizDisplayCompositor is the process that composites the DOM after
+    SwiftShader renders it. Disabling it prevents Google Maps from
+    populating aria-label attributes on review elements, causing
+    _extract_num_recensioni to always return 0 on Linux headless.
     """
     options.add_argument("--headless=new")
     options.add_argument("--disable-gpu")
@@ -52,7 +56,6 @@ def _apply_headless_flags(options, is_linux: bool) -> None:
     if is_linux:
         options.add_argument("--use-gl=swiftshader")
         options.add_argument("--run-all-compositor-stages-before-draw")
-        options.add_argument("--disable-features=VizDisplayCompositor")
         options.add_argument("--force-device-scale-factor=1")
     # NOTE: --disable-software-rasterizer is intentionally NOT added.
     # On Linux it would kill the only available renderer (SwiftShader),
