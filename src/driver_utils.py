@@ -19,6 +19,18 @@ logger = logging.getLogger(__name__)
 
 _IS_LINUX = platform.system() == "Linux"
 
+# Realistic macOS Chrome UA used on Linux headless to avoid GMaps bot-detection.
+# Google Maps serves a "limited view" (no reviews, no contacts) to Chrome
+# instances that advertise a Linux/headless UA or an outdated Chrome version.
+# macOS + recent Chrome version matches what real users send and gets the full
+# place page. This UA is intentionally NOT applied on macOS (real UA is used)
+# and NOT applied in headed mode (fingerprint would be inconsistent).
+_MACOS_SPOOF_UA = (
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+    "AppleWebKit/537.36 (KHTML, like Gecko) "
+    "Chrome/126.0.0.0 Safari/537.36"
+)
+
 
 def _apply_headless_flags(options, is_linux: bool) -> None:
     """
@@ -125,6 +137,11 @@ def init_driver(
         except Exception as e:
             logger.warning(f"Impossibile rilevare versione Chrome: {e}")
 
+    # On Linux headless, spoof a macOS UA so Google Maps serves the full place
+    # page instead of the limited/preview view it sends to Linux/headless UAs.
+    # On macOS or in headed mode the real browser UA is used.
+    _spoof_ua = _MACOS_SPOOF_UA if (_IS_LINUX and headless) else None
+
     # Shared non-GPU flags (applied on both platforms)
     _COMMON_FLAGS = [
         "--no-sandbox",
@@ -145,7 +162,13 @@ def init_driver(
         # 1920x1080 — Maps needs sufficient height to render the review block
         "--window-size=1920,1080",
         f"--lang={lang}",
+        # Suppress automation signals — applied to ALL paths including uc.Chrome
+        "--disable-blink-features=AutomationControlled",
+        "--exclude-switches=enable-automation",
     ]
+    if _spoof_ua:
+        _COMMON_FLAGS.append(f"--user-agent={_spoof_ua}")
+        logger.info(f"[UA Spoof] Linux headless — UA impostato a macOS Chrome126")
 
     driver = None
     try:
@@ -178,11 +201,6 @@ def init_driver(
         for flag in _COMMON_FLAGS:
             chrome_options.add_argument(flag)
         chrome_options.add_argument("--remote-debugging-port=9222")
-        chrome_options.add_argument("--disable-blink-features=AutomationControlled")
-        chrome_options.add_argument(
-            "--user-agent=Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
         if chromium_binary:
             chrome_options.binary_location = chromium_binary
 
@@ -194,10 +212,20 @@ def init_driver(
             ).install()
         )
         driver = webdriver.Chrome(service=service, options=chrome_options)
-        driver.execute_script(
-            "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
-        )
         logger.info("Chrome avviato con ChromeDriverManager")
+
+    # Patch navigator.webdriver via CDP — survives page navigations unlike
+    # execute_script which is one-shot and reset on every driver.get().
+    try:
+        driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
+            "source": """
+                Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+                Object.defineProperty(navigator, 'platform', {get: () => 'MacIntel'});
+            """
+        })
+        logger.info("[CDP] navigator.webdriver + platform patch applicata")
+    except Exception as e:
+        logger.warning(f"[CDP] Patch navigator fallita: {e}")
 
     # --- Resource monitor ---------------------------------------------------
     try:
