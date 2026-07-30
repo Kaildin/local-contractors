@@ -15,10 +15,22 @@ already-initialised Chrome handles.
 from __future__ import annotations
 
 import logging
+import signal
+import time
 import traceback
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
+
+# Flag usato dall'handler SIGTERM per interrompere il loop delle citta'
+_STOP_REQUESTED = False
+
+
+def _handle_sigterm(signum, frame):
+    """Setta il flag di stop quando il processo riceve SIGTERM o SIGINT."""
+    global _STOP_REQUESTED
+    _STOP_REQUESTED = True
+    logger.warning("[Worker] SIGTERM/SIGINT ricevuto — stop al prossimo ciclo")
 
 
 def worker_scrape_cities(
@@ -38,16 +50,29 @@ def worker_scrape_cities(
     """
     Process a list of city entries serially, each with its own fresh driver.
 
+    Ogni citta' ottiene un driver Chrome dedicato che viene sempre chiuso
+    nel blocco finally, anche in caso di eccezione o segnale di stop.
+    All'avvio il worker si mette in attesa per worker_id*2 secondi per
+    evitare che tutti i worker patchino undetected_chromedriver nello stesso
+    istante (il FileLock in driver_utils serializza ulteriormente il patching).
+
     Parameters
     ----------
     city_entries : list of dicts with keys 'city', 'state', 'population'
     keywords     : list of keyword strings
-    worker_id    : integer label used only in log messages
+    worker_id    : integer label used in log messages and startup stagger
 
     Returns
     -------
     Flat list of lead dicts collected across all cities in this chunk.
     """
+    global _STOP_REQUESTED
+    _STOP_REQUESTED = False
+
+    # Registra handler per SIGTERM (GUI Stop) e SIGINT (Ctrl+C)
+    signal.signal(signal.SIGTERM, _handle_sigterm)
+    signal.signal(signal.SIGINT, _handle_sigterm)
+
     # Local imports so that Chrome is only initialised inside the spawned
     # process, never in the parent that calls ProcessPoolExecutor.
     from src.scraper import search_contractors, get_max_results  # noqa: PLC0415
@@ -58,9 +83,22 @@ def worker_scrape_cities(
         format=f"%(asctime)s [W{worker_id}][%(levelname)s] %(name)s: %(message)s",
     )
 
+    # Stagger startup: evita che tutti i worker inizino contemporaneamente
+    # e si pestino i piedi durante il patching di undetected_chromedriver.
+    # Il FileLock in driver_utils e' la protezione principale; questo stagger
+    # riduce la contesa iniziale e abbassa il picco di RAM al lancio.
+    stagger_secs = worker_id * 2
+    if stagger_secs > 0:
+        logger.info(f"[W{worker_id}] Startup stagger: attendo {stagger_secs}s...")
+        time.sleep(stagger_secs)
+
     all_results: List[Dict[str, Any]] = []
 
     for entry in city_entries:
+        if _STOP_REQUESTED:
+            logger.warning(f"[W{worker_id}] Stop richiesto — esco dal loop citta'")
+            break
+
         city       = entry["city"]
         state      = entry["state"]
         population = entry["population"]

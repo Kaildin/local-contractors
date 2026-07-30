@@ -4,6 +4,8 @@ import platform
 import shutil
 import subprocess
 import re
+import time
+from pathlib import Path
 from typing import Tuple
 
 from selenium import webdriver
@@ -13,18 +15,25 @@ from webdriver_manager.chrome import ChromeDriverManager
 from webdriver_manager.core.os_manager import ChromeType
 import undetected_chromedriver as uc
 
+try:
+    import filelock as _filelock_mod
+    _FILELOCK_AVAILABLE = True
+except ImportError:
+    _FILELOCK_AVAILABLE = False
+
 from src.resource_monitor import ChromeResourceMonitor
 
 logger = logging.getLogger(__name__)
 
 _IS_LINUX = platform.system() == "Linux"
 
+# Lock file path used to serialise undetected_chromedriver patching.
+# Multiple parallel workers all patch the same binary; without a lock
+# they corrupt each other's write and the ChromeDriver crashes with
+# 'Connection refused' immediately after startup.
+_UCD_LOCK_PATH = Path.home() / ".local" / "share" / "undetected_chromedriver" / "init.lock"
+
 # Realistic macOS Chrome UA used on Linux headless to avoid GMaps bot-detection.
-# Google Maps serves a "limited view" (no reviews, no contacts) to Chrome
-# instances that advertise a Linux/headless UA or an outdated Chrome version.
-# macOS + recent Chrome version matches what real users send and gets the full
-# place page. This UA is intentionally NOT applied on macOS (real UA is used)
-# and NOT applied in headed mode (fingerprint would be inconsistent).
 _MACOS_SPOOF_UA = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -70,8 +79,6 @@ def _apply_headless_flags(options, is_linux: bool) -> None:
         options.add_argument("--run-all-compositor-stages-before-draw")
         options.add_argument("--force-device-scale-factor=1")
     # NOTE: --disable-software-rasterizer is intentionally NOT added.
-    # On Linux it would kill the only available renderer (SwiftShader),
-    # leaving Chrome with no compositor and causing Maps to render blank.
 
 
 def init_driver(
@@ -83,17 +90,21 @@ def init_driver(
 ) -> Tuple[webdriver.Chrome, "ChromeResourceMonitor"]:
     """Inizializza Chrome con auto-detection della versione installata.
 
+    La chiamata a uc.Chrome() e' protetta da un FileLock su Linux per
+    evitare la race condition in cui piu' worker paralleli tentano di
+    patchare lo stesso binario undetected_chromedriver simultaneamente,
+    provocando 'Connection refused' immediato su tutti i driver tranne
+    il primo.
+
     Args:
         headless: avvia Chrome in modalita' headless se True.
-        lang: stringa lingua da passare a --lang (es. 'en-US,en' oppure 'it-IT,it').
+        lang: stringa lingua da passare a --lang.
         monitor: se True, avvia il ChromeResourceMonitor sul driver creato.
-        monitor_interval: intervallo in secondi tra i campionamenti in background.
-        worker_label: etichetta opzionale mostrata nei log del monitor
-            (es. 'worker-3' o il nome della citta' corrente).
+        monitor_interval: intervallo in secondi tra i campionamenti.
+        worker_label: etichetta opzionale nei log del monitor.
 
     Returns:
-        Tuple (driver, monitor). Se monitor=False, il secondo elemento e'
-        un _NullMonitor inerte.
+        Tuple (driver, monitor).
     """
     logger.info(
         f"Inizializzazione driver Chrome "
@@ -109,7 +120,6 @@ def init_driver(
         shutil.which("google-chrome"),
         shutil.which("chromium-browser"),
         shutil.which("chromium"),
-        # macOS paths
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
         "/Applications/Chromium.app/Contents/MacOS/Chromium",
         "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
@@ -137,12 +147,8 @@ def init_driver(
         except Exception as e:
             logger.warning(f"Impossibile rilevare versione Chrome: {e}")
 
-    # On Linux headless, spoof a macOS UA so Google Maps serves the full place
-    # page instead of the limited/preview view it sends to Linux/headless UAs.
-    # On macOS or in headed mode the real browser UA is used.
     _spoof_ua = _MACOS_SPOOF_UA if (_IS_LINUX and headless) else None
 
-    # Shared non-GPU flags (applied on both platforms)
     _COMMON_FLAGS = [
         "--no-sandbox",
         "--disable-dev-shm-usage",
@@ -159,16 +165,14 @@ def init_driver(
         "--disable-sync",
         "--mute-audio",
         "--no-first-run",
-        # 1920x1080 — Maps needs sufficient height to render the review block
         "--window-size=1920,1080",
         f"--lang={lang}",
-        # Suppress automation signals — applied to ALL paths including uc.Chrome
         "--disable-blink-features=AutomationControlled",
         "--exclude-switches=enable-automation",
     ]
     if _spoof_ua:
         _COMMON_FLAGS.append(f"--user-agent={_spoof_ua}")
-        logger.info(f"[UA Spoof] Linux headless — UA impostato a macOS Chrome126")
+        logger.info("[UA Spoof] Linux headless — UA impostato a macOS Chrome126")
 
     driver = None
     try:
@@ -182,12 +186,38 @@ def init_driver(
         if chromium_binary:
             uc_options.binary_location = chromium_binary
 
-        driver = uc.Chrome(
-            options=uc_options,
-            version_main=chromium_version_int if chromium_version_int else None,
-            use_subprocess=True,
-            suppress_welcome=True,
-        )
+        # --- FileLock: serialise uc patching across parallel workers ----------
+        # undetected_chromedriver writes to a single shared binary file during
+        # patching. Concurrent workers race on that write, the losers get a
+        # corrupted binary and immediately hit 'Connection refused'.
+        # We hold the lock only for the uc.Chrome() constructor call (the
+        # actual patch + process launch), then release it so other workers
+        # can proceed while this worker is already running.
+        if _FILELOCK_AVAILABLE:
+            _UCD_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
+            lock = _filelock_mod.FileLock(str(_UCD_LOCK_PATH), timeout=120)
+            with lock:
+                logger.debug("[UCDLock] Lock acquisito — avvio uc.Chrome()")
+                driver = uc.Chrome(
+                    options=uc_options,
+                    version_main=chromium_version_int if chromium_version_int else None,
+                    use_subprocess=True,
+                    suppress_welcome=True,
+                )
+            logger.debug("[UCDLock] Lock rilasciato")
+        else:
+            # filelock not installed: fall back to unprotected init
+            # (install with: pip install filelock)
+            logger.warning(
+                "[UCDLock] filelock non installato — init uc.Chrome() non serializzato. "
+                "Installa con: pip install filelock"
+            )
+            driver = uc.Chrome(
+                options=uc_options,
+                version_main=chromium_version_int if chromium_version_int else None,
+                use_subprocess=True,
+                suppress_welcome=True,
+            )
         logger.info("Chrome avviato con undetected_chromedriver")
     except Exception as uc_error:
         logger.warning(f"undetected_chromedriver fallito: {uc_error} — provo ChromeDriverManager...")
@@ -214,8 +244,7 @@ def init_driver(
         driver = webdriver.Chrome(service=service, options=chrome_options)
         logger.info("Chrome avviato con ChromeDriverManager")
 
-    # Patch navigator.webdriver via CDP — survives page navigations unlike
-    # execute_script which is one-shot and reset on every driver.get().
+    # Patch navigator.webdriver via CDP
     try:
         driver.execute_cdp_cmd("Page.addScriptToEvaluateOnNewDocument", {
             "source": """
@@ -228,6 +257,7 @@ def init_driver(
         logger.warning(f"[CDP] Patch navigator fallita: {e}")
 
     # --- Resource monitor ---------------------------------------------------
+    mon: "ChromeResourceMonitor"
     try:
         driver_pid = driver.service.process.pid
         mon = ChromeResourceMonitor(
@@ -248,6 +278,63 @@ def init_driver(
         mon = _NullMonitor()  # type: ignore[assignment]
 
     return driver, mon
+
+
+def quit_driver(driver, mon=None, label: str = "") -> None:
+    """Chiude driver + monitor in modo sicuro, killando i processi figli.
+
+    Chiama driver.quit() per mandare il segnale di shutdown a Chrome,
+    poi killa esplicitamente il processo ChromeDriver e i suoi figli
+    tramite psutil per garantire che nessun processo orfano rimanga in
+    memoria dopo uno stop forzato o un'eccezione.
+
+    Args:
+        driver: istanza webdriver.Chrome da chiudere.
+        mon: ChromeResourceMonitor opzionale da stoppare prima del quit.
+        label: etichetta per il log (es. nome citta').
+    """
+    tag = f"[{label}] " if label else ""
+
+    # 1. Stoppa il monitor di risorse
+    if mon is not None:
+        try:
+            mon.stop()
+        except Exception:
+            pass
+
+    if driver is None:
+        return
+
+    # 2. Prova quit() pulito
+    try:
+        driver.quit()
+        logger.debug(f"{tag}driver.quit() completato")
+    except Exception as e:
+        logger.warning(f"{tag}driver.quit() fallito: {e}")
+
+    # 3. Kill esplicito del processo ChromeDriver + figli tramite psutil
+    try:
+        import psutil
+        try:
+            pid = driver.service.process.pid
+        except Exception:
+            return
+        try:
+            proc = psutil.Process(pid)
+            children = proc.children(recursive=True)
+            for child in children:
+                try:
+                    child.kill()
+                except psutil.NoSuchProcess:
+                    pass
+            proc.kill()
+            logger.debug(f"{tag}Processo ChromeDriver PID={pid} killato")
+        except psutil.NoSuchProcess:
+            pass  # gia' morto, va bene
+        except Exception as e:
+            logger.warning(f"{tag}Kill ChromeDriver fallito: {e}")
+    except ImportError:
+        logger.debug(f"{tag}psutil non disponibile — skip kill esplicito")
 
 
 class _NullMonitor:
