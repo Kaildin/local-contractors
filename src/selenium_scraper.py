@@ -854,6 +854,39 @@ def scrape_with_selenium(
                         f"— procedo comunque con page_source"
                     )
 
+                # On Linux headless, elements exist in the DOM before their
+                # aria-label attribute is populated with numeric data.
+                # Poll up to 5s until at least one review selector carries
+                # an actual digit, ensuring page_source is also up-to-date.
+                if headless:
+                    _review_data_selectors = (
+                        "span[aria-label*='recension'], "
+                        "span[aria-label*='review'], "
+                        "button[aria-label*='recension'], "
+                        "button[aria-label*='review'], "
+                        "div.F7nice"
+                    )
+                    _headless_deadline = time.time() + 5
+                    _review_data_found = False
+                    while time.time() < _headless_deadline:
+                        try:
+                            _els = driver.find_elements(By.CSS_SELECTOR, _review_data_selectors)
+                            for _el in _els:
+                                _label = _el.get_attribute("aria-label") or _el.text or ""
+                                if re.search(r'\d', _label):
+                                    _review_data_found = True
+                                    break
+                        except Exception:
+                            pass
+                        if _review_data_found:
+                            break
+                        time.sleep(0.5)
+                    if not _review_data_found:
+                        logger.warning(
+                            f"[Headless] Nessun dato numerico nei selettori recensioni "
+                            f"per '{name}' dopo 5s — procedo con page_source"
+                        )
+
                 num_recensioni = _extract_num_recensioni(driver)
                 logger.info(f"Recensioni rilevate per {name}: {num_recensioni}")
 
