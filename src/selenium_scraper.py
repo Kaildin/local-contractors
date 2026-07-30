@@ -511,6 +511,20 @@ def _wait_for_authority_link(driver, timeout: int = 6) -> bool:
 
 
 def _navigate_to_place(driver, name: str, place_href: str, lang: str = "en"):
+    """
+    Naviga alla scheda Google Maps completa di un place evitando la limited
+    view (maps/preview/place) che Chrome headless ottiene navigando
+    direttamente a Google Maps.
+
+    Strategia (in ordine):
+      1. Google Search SERP  — cerca '{name} google maps' su google.com/search,
+         trova il primo link a maps.google.com/maps/place/ e lo naviga.
+         Questo e' il flow piu' affidabile: la scheda viene servita come se
+         arrivasse da una ricerca organica, senza limited view.
+      2. maps/search/ diretto — fallback se la SERP non trova link Maps.
+      3. Click dal primo risultato della lista Maps (gia' presente).
+      4. URL diretto (place_href) — ultimo resort.
+    """
     cfg = _get_lang_cfg(lang)
     hl = cfg["hl"]
     gl = cfg["gl"]
@@ -554,7 +568,6 @@ def _navigate_to_place(driver, name: str, place_href: str, lang: str = "en"):
             "div[role='article'] a[href*='/maps/place/']",
             "div.Nv2PK a[href*='/maps/place/']",
         ]
-
         for sel in selectors:
             try:
                 elements = driver.find_elements(By.CSS_SELECTOR, sel)
@@ -579,58 +592,135 @@ def _navigate_to_place(driver, name: str, place_href: str, lang: str = "en"):
             except Exception as e:
                 logger.debug(f"[Nav] Selector fallito {sel}: {e}")
                 continue
-
         return False
 
+    # ------------------------------------------------------------------
+    # STEP 1: Google Search SERP -> click link maps/place/
+    # ------------------------------------------------------------------
+    name_encoded = quote_plus(name)
+    google_search_url = (
+        f"https://www.google.com/search?q={name_encoded}+google+maps"
+        f"&hl={hl}&gl={gl}"
+    )
+    logger.info(f"[Nav] STEP 1 — Google Search SERP: {google_search_url}")
+    try:
+        driver.get(google_search_url)
+        time.sleep(3)
+
+        # Accetta cookie se compare il dialog
+        cookie_selectors = [
+            (By.ID, "L2AGLb"),
+            (By.CSS_SELECTOR, ".tHlp8d"),
+            (By.XPATH, "//button[contains(., 'Accetta tutto')]"),
+            (By.XPATH, "//button[contains(., 'Accept all')]"),
+        ]
+        for sel_type, sel in cookie_selectors:
+            try:
+                btn = WebDriverWait(driver, 2).until(EC.element_to_be_clickable((sel_type, sel)))
+                driver.execute_script("arguments[0].click();", btn)
+                time.sleep(1)
+                break
+            except Exception:
+                pass
+
+        # Cerca link a maps/place/ nei risultati SERP
+        maps_place_link = None
+        candidate_selectors = [
+            "a[href*='maps.google.com/maps/place/']",
+            "a[href*='google.com/maps/place/']",
+            "a[href*='/maps/place/']",
+        ]
+        for csel in candidate_selectors:
+            try:
+                links = driver.find_elements(By.CSS_SELECTOR, csel)
+                for link in links:
+                    href = link.get_attribute("href") or ""
+                    if "/maps/place/" in href:
+                        maps_place_link = href
+                        logger.info(f"[Nav] STEP 1 link trovato: {href[:80]}")
+                        break
+                if maps_place_link:
+                    break
+            except Exception:
+                continue
+
+        if maps_place_link:
+            driver.get(maps_place_link)
+            time.sleep(5)
+            logger.info(f"[Nav] STEP 1 URL dopo navigazione SERP link: {driver.current_url}")
+            if "/maps/place/" in driver.current_url and _has_review_signals():
+                logger.info("[Nav] STEP 1 OK — scheda place completa via SERP")
+                return
+            # Potrebbe servire un attimo in piu' su Linux headless
+            for _ in range(6):
+                if _has_review_signals():
+                    logger.info("[Nav] STEP 1 OK — review signals apparsi dopo attesa")
+                    return
+                time.sleep(1)
+            logger.info("[Nav] STEP 1 — su place page ma senza review signals, continuo")
+            if "/maps/place/" in driver.current_url:
+                return  # meglio fermarsi qui che tornare alla limited view
+        else:
+            logger.info("[Nav] STEP 1 — nessun link maps/place/ trovato nella SERP")
+
+    except Exception as e:
+        logger.warning(f"[Nav] STEP 1 fallito: {e}")
+
+    # ------------------------------------------------------------------
+    # STEP 2: warmup + maps/search/ diretto
+    # ------------------------------------------------------------------
     try:
         driver.get("https://www.google.com")
         time.sleep(2)
-        logger.info("[Nav] Warmup completato")
+        logger.info("[Nav] STEP 2 warmup completato")
     except Exception as e:
         logger.debug(f"[Nav] Warmup fallito: {e}")
 
-    name_encoded = quote_plus(name)
     search_url = (
         f"https://www.google.com/maps/search/{name_encoded}"
         f"/?hl={hl}&gl={gl}&authuser=0"
     )
-    logger.info(f"[Nav] Navigazione via search: {search_url}")
+    logger.info(f"[Nav] STEP 2 — maps/search/: {search_url}")
     try:
         driver.get(search_url)
         time.sleep(5)
-        logger.info(f"[Nav] URL dopo search: {driver.current_url}")
+        logger.info(f"[Nav] STEP 2 URL dopo search: {driver.current_url}")
     except Exception as e:
-        logger.warning(f"[Nav] Search navigation fallita: {e}")
+        logger.warning(f"[Nav] STEP 2 search navigation fallita: {e}")
 
     if "/maps/place/" in driver.current_url and _has_review_signals():
-        logger.info("[Nav] Place page valida gia' ottenuta via search")
+        logger.info("[Nav] STEP 2 OK — place page valida via maps/search/")
         return
 
+    # ------------------------------------------------------------------
+    # STEP 3: click dal primo risultato della lista Maps
+    # ------------------------------------------------------------------
     if "/maps/place/" not in driver.current_url:
-        logger.info("[Nav] Non siamo su una scheda place, provo click da lista risultati")
+        logger.info("[Nav] STEP 3 — provo click da lista risultati Maps")
         clicked = _click_first_place_result()
-        logger.info(f"[Nav] Esito click da lista: {clicked}")
-        logger.info(f"[Nav] URL dopo click lista: {driver.current_url}")
-
+        logger.info(f"[Nav] STEP 3 esito click: {clicked} — URL: {driver.current_url}")
         if "/maps/place/" in driver.current_url and _has_review_signals():
-            logger.info("[Nav] Scheda place ottenuta cliccando dalla lista")
+            logger.info("[Nav] STEP 3 OK — scheda place da click lista")
             return
 
     if "/maps/place/" in driver.current_url:
-        logger.info("[Nav] Siamo su place page, attendo eventuale rendering tardivo")
+        logger.info("[Nav] Su place page, attendo rendering tardivo")
         for _ in range(6):
             if _has_review_signals():
-                logger.info("[Nav] Segnali recensioni comparsi dopo attesa")
+                logger.info("[Nav] Review signals comparsi dopo attesa")
                 return
             time.sleep(1)
 
-    logger.info("[Nav] Fallback finale su URL diretto")
+    # ------------------------------------------------------------------
+    # STEP 4: URL diretto (fallback finale)
+    # ------------------------------------------------------------------
+    logger.info("[Nav] STEP 4 — fallback su URL diretto")
     try:
         driver.get(place_href)
         time.sleep(4)
-        logger.info(f"[Nav] URL dopo fallback diretto: {driver.current_url}")
+        logger.info(f"[Nav] STEP 4 URL dopo fallback diretto: {driver.current_url}")
     except Exception as e:
-        logger.error(f"[Nav] Fallback diretto fallito: {e}")
+        logger.error(f"[Nav] STEP 4 fallback diretto fallito: {e}")
         raise
 
 
@@ -839,9 +929,6 @@ def scrape_with_selenium(
 
                 maps_url = driver.current_url
 
-                # Raised from 8s to 15s — Linux headless SW rendering is
-                # significantly slower than macOS GPU rendering. Log a warning
-                # instead of silently passing so slow pages are visible in logs.
                 try:
                     WebDriverWait(driver, 15).until(
                         EC.presence_of_element_located((By.CSS_SELECTOR,
@@ -854,10 +941,6 @@ def scrape_with_selenium(
                         f"— procedo comunque con page_source"
                     )
 
-                # On Linux headless, elements exist in the DOM before their
-                # aria-label attribute is populated with numeric data.
-                # Poll up to 5s until at least one review selector carries
-                # an actual digit, ensuring page_source is also up-to-date.
                 if headless:
                     _review_data_selectors = (
                         "span[aria-label*='recension'], "
