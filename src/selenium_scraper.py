@@ -3,6 +3,7 @@ import time
 import random
 import re
 import csv
+import threading
 
 import os
 import datetime
@@ -51,7 +52,6 @@ _LANG_CONFIG = {
 
 
 def _get_lang_cfg(lang: str) -> dict:
-    """Restituisce la config per il lang richiesto (default: 'en')."""
     return _LANG_CONFIG.get(lang.lower(), _LANG_CONFIG["en"])
 
 
@@ -91,16 +91,6 @@ def _save_serp_screenshot(driver, *, comune: str, keyword: str, scroll_idx: int)
 
 
 def _dump_serp_names_csv(place_urls: list, *, comune: str, keyword: str) -> str:
-    """
-    Scrive un CSV temporaneo in debug/ con i nomi dei business estratti
-    dalla pagina dei risultati SERP, prima di navigare nelle singole schede.
-
-    Colonne: index, nome, maps_href
-    Nome file: debug/serp_names_<comune>_<keyword>_<timestamp>.csv
-
-    Utile per verificare quanti/quali risultati lo scroll ha caricato
-    senza aspettare l'intero scraping delle schede.
-    """
     try:
         out_dir = "debug"
         os.makedirs(out_dir, exist_ok=True)
@@ -197,6 +187,22 @@ def sanitize_website(url: str) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Interruptible sleep helper
+# ---------------------------------------------------------------------------
+
+def _sleep_interruptible(seconds: float, stop_event: threading.Event = None):
+    """Sleep interrompibile: esce subito se stop_event viene impostato."""
+    if stop_event is None:
+        time.sleep(seconds)
+        return
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        if stop_event.is_set():
+            return
+        time.sleep(min(0.3, deadline - time.time()))
+
+
+# ---------------------------------------------------------------------------
 # Scroll
 # ---------------------------------------------------------------------------
 
@@ -207,15 +213,8 @@ def _scroll_results_panel(
     keyword: str = "",
     stale_limit: int = 6,
     debug_screenshot: bool = False,
+    stop_event: threading.Event = None,
 ):
-    """
-    Scrolla il pannello risultati Google Maps fino alla fine della lista.
-
-    Si ferma quando:
-      1. Viene rilevato l'elemento di fine lista GMaps con testo riconoscibile.
-      2. Il conteggio risultati rimane invariato per `stale_limit` scroll
-         consecutivi DOPO attesa adattiva (fino a 2.5s per burst tardivi).
-    """
     END_OF_LIST_SELECTORS = [
         "div.HlvSq",
         "span.HlvSq",
@@ -254,6 +253,11 @@ def _scroll_results_panel(
     stale_streak = 0
 
     for i in range(scroll_times):
+        # --- STOP CHECK ---
+        if stop_event and stop_event.is_set():
+            logger.info("[Scroll] stop_event impostato, interruzione scroll.")
+            return
+
         for end_sel in END_OF_LIST_SELECTORS:
             try:
                 end_els = driver.find_elements(By.CSS_SELECTOR, end_sel)
@@ -288,6 +292,9 @@ def _scroll_results_panel(
         adaptive_deadline = time.time() + 2.5
         after_count = before_count
         while time.time() < adaptive_deadline:
+            if stop_event and stop_event.is_set():
+                logger.info("[Scroll] stop_event durante attesa adattiva, esco.")
+                return
             time.sleep(0.4)
             try:
                 after_count = len(driver.find_elements(By.CSS_SELECTOR, RESULT_SELECTOR))
@@ -335,10 +342,6 @@ def _extract_place_url_from_element(element) -> str:
 
 
 def _extract_num_recensioni(driver) -> int:
-    """
-    Legge il numero di recensioni dalla scheda Google Maps.
-    """
-
     try:
         body_src = driver.page_source
 
@@ -461,9 +464,11 @@ def _name_matches_title(name: str, title: str) -> bool:
     return (matches / len(name_words)) >= 0.4
 
 
-def _wait_for_place_page(driver, expected_name: str, timeout: int = 15) -> bool:
+def _wait_for_place_page(driver, expected_name: str, timeout: int = 15, stop_event: threading.Event = None) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
+        if stop_event and stop_event.is_set():
+            return False
         try:
             if "/maps/place/" not in driver.current_url:
                 time.sleep(0.5)
@@ -490,9 +495,11 @@ def _wait_for_place_page(driver, expected_name: str, timeout: int = 15) -> bool:
     return False
 
 
-def _wait_for_authority_link(driver, timeout: int = 6) -> bool:
+def _wait_for_authority_link(driver, timeout: int = 6, stop_event: threading.Event = None) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
+        if stop_event and stop_event.is_set():
+            return False
         try:
             els = driver.find_elements(By.CSS_SELECTOR, "a[data-item-id='authority']")
             if els:
@@ -510,7 +517,7 @@ def _wait_for_authority_link(driver, timeout: int = 6) -> bool:
     return False
 
 
-def _navigate_to_place(driver, name: str, place_href: str, lang: str = "en"):
+def _navigate_to_place(driver, name: str, place_href: str, lang: str = "en", stop_event: threading.Event = None):
     cfg = _get_lang_cfg(lang)
     hl = cfg["hl"]
     gl = cfg["gl"]
@@ -556,6 +563,8 @@ def _navigate_to_place(driver, name: str, place_href: str, lang: str = "en"):
                 elements = driver.find_elements(By.CSS_SELECTOR, sel)
                 logger.info(f"[Nav] Trovati {len(elements)} candidati con {sel}")
                 for idx, el in enumerate(elements[:5]):
+                    if stop_event and stop_event.is_set():
+                        return False
                     try:
                         href = el.get_attribute("href") or ""
                         if "/maps/place/" not in href:
@@ -578,12 +587,18 @@ def _navigate_to_place(driver, name: str, place_href: str, lang: str = "en"):
 
         return False
 
+    if stop_event and stop_event.is_set():
+        return
+
     try:
         driver.get("https://www.google.com")
-        time.sleep(2)
+        _sleep_interruptible(2, stop_event)
         logger.info("[Nav] Warmup completato")
     except Exception as e:
         logger.debug(f"[Nav] Warmup fallito: {e}")
+
+    if stop_event and stop_event.is_set():
+        return
 
     name_encoded = quote_plus(name)
     search_url = (
@@ -593,10 +608,13 @@ def _navigate_to_place(driver, name: str, place_href: str, lang: str = "en"):
     logger.info(f"[Nav] Navigazione via search: {search_url}")
     try:
         driver.get(search_url)
-        time.sleep(5)
+        _sleep_interruptible(5, stop_event)
         logger.info(f"[Nav] URL dopo search: {driver.current_url}")
     except Exception as e:
         logger.warning(f"[Nav] Search navigation fallita: {e}")
+
+    if stop_event and stop_event.is_set():
+        return
 
     if "/maps/place/" in driver.current_url and _has_review_signals():
         logger.info("[Nav] Place page valida gia' ottenuta via search")
@@ -612,18 +630,26 @@ def _navigate_to_place(driver, name: str, place_href: str, lang: str = "en"):
             logger.info("[Nav] Scheda place ottenuta cliccando dalla lista")
             return
 
+    if stop_event and stop_event.is_set():
+        return
+
     if "/maps/place/" in driver.current_url:
         logger.info("[Nav] Siamo su place page, attendo eventuale rendering tardivo")
         for _ in range(6):
+            if stop_event and stop_event.is_set():
+                return
             if _has_review_signals():
                 logger.info("[Nav] Segnali recensioni comparsi dopo attesa")
                 return
             time.sleep(1)
 
+    if stop_event and stop_event.is_set():
+        return
+
     logger.info("[Nav] Fallback finale su URL diretto")
     try:
         driver.get(place_href)
-        time.sleep(4)
+        _sleep_interruptible(4, stop_event)
         logger.info(f"[Nav] URL dopo fallback diretto: {driver.current_url}")
     except Exception as e:
         logger.error(f"[Nav] Fallback diretto fallito: {e}")
@@ -642,14 +668,14 @@ def scrape_with_selenium(
     headless: bool = True,
     lang: str = "en",
     debug_screenshot: bool = False,
+    stop_event: threading.Event = None,
 ):
     cfg = _get_lang_cfg(lang)
     results = []
     seen_in_run: set = set()
-    mon = None  # will be set on first driver init
+    mon = None
 
     def _init_driver_with_label(label: str = ""):
-        """Helper to init driver and keep mon in closure."""
         nonlocal mon
         _driver, _mon = init_driver(
             headless=headless,
@@ -673,6 +699,11 @@ def scrape_with_selenium(
                 raise
 
     for search in search_urls:
+        # --- STOP CHECK ---
+        if stop_event and stop_event.is_set():
+            logger.warning("[Stop] stop_event impostato, esco dal loop search_urls.")
+            break
+
         comune_attuale = search['comune']
         keyword = search['keyword']
         url = search['url']
@@ -684,6 +715,8 @@ def scrape_with_selenium(
             max_retries = 2
             nav_success = False
             for attempt in range(max_retries + 1):
+                if stop_event and stop_event.is_set():
+                    break
                 try:
                     if driver is None:
                         driver = _init_driver_with_label(worker_label)
@@ -702,10 +735,15 @@ def scrape_with_selenium(
                             pass
                         driver = None
                         mon = None
-                        time.sleep(2)
+                        _sleep_interruptible(2, stop_event)
+                        if stop_event and stop_event.is_set():
+                            break
                         driver = _init_driver_with_label(worker_label)
                     else:
                         raise e_nav
+
+            if stop_event and stop_event.is_set():
+                break
 
             if not nav_success:
                 logger.error(f"Impossibile navigare a {url} dopo retry. Salto.")
@@ -728,12 +766,18 @@ def scrape_with_selenium(
                         EC.element_to_be_clickable((selector_type, selector))
                     )
                     driver.execute_script("arguments[0].click();", consent_button)
-                    time.sleep(1)
+                    _sleep_interruptible(1, stop_event)
                     break
                 except Exception:
                     continue
 
-            time.sleep(2)
+            if stop_event and stop_event.is_set():
+                break
+
+            _sleep_interruptible(2, stop_event)
+
+            if stop_event and stop_event.is_set():
+                break
 
             logger.info("Scrolling per caricare risultati...")
             _scroll_results_panel(
@@ -742,7 +786,11 @@ def scrape_with_selenium(
                 comune=comune_attuale,
                 keyword=keyword,
                 debug_screenshot=debug_screenshot,
+                stop_event=stop_event,
             )
+
+            if stop_event and stop_event.is_set():
+                break
 
             selectors_to_try = [
                 "div[role='article']",
@@ -770,7 +818,6 @@ def scrape_with_selenium(
 
             if not result_elements:
                 logger.warning(f"Nessun risultato trovato per {keyword} {comune_attuale}")
-                # Log resources even on empty results
                 if mon:
                     mon.log_stats()
                 continue
@@ -795,9 +842,6 @@ def scrape_with_selenium(
                         pass
                 place_urls.append({"href": href, "name": name_candidate})
 
-            # ----------------------------------------------------------------
-            # SERP names dump
-            # ----------------------------------------------------------------
             _dump_serp_names_csv(
                 place_urls,
                 comune=comune_attuale,
@@ -806,6 +850,11 @@ def scrape_with_selenium(
 
             n_to_process = min(max_results, len(place_urls))
             for i in range(n_to_process):
+                # --- STOP CHECK ---
+                if stop_event and stop_event.is_set():
+                    logger.warning("[Stop] Interruzione loop place durante scraping.")
+                    break
+
                 entry = place_urls[i]
                 place_href = entry["href"]
                 name = entry["name"]
@@ -827,12 +876,15 @@ def scrape_with_selenium(
 
                 logger.info(f"Navigazione scheda con bypass limited view: {name}")
                 try:
-                    _navigate_to_place(driver, name, place_href, lang=lang)
+                    _navigate_to_place(driver, name, place_href, lang=lang, stop_event=stop_event)
                 except Exception as e_nav:
                     logger.error(f"Errore navigazione scheda '{name}': {e_nav}")
                     continue
 
-                panel_ready = _wait_for_place_page(driver, expected_name=name, timeout=15)
+                if stop_event and stop_event.is_set():
+                    break
+
+                panel_ready = _wait_for_place_page(driver, expected_name=name, timeout=15, stop_event=stop_event)
                 if not panel_ready:
                     logger.warning(f"[Skip] Scheda non caricata per '{name}', salto.")
                     continue
@@ -847,6 +899,9 @@ def scrape_with_selenium(
                             "div.F7nice")))
                 except Exception:
                     pass
+
+                if stop_event and stop_event.is_set():
+                    break
 
                 num_recensioni = _extract_num_recensioni(driver)
                 logger.info(f"Recensioni rilevate per {name}: {num_recensioni}")
@@ -909,7 +964,10 @@ def scrape_with_selenium(
                     except Exception:
                         continue
 
-                _wait_for_authority_link(driver, timeout=6)
+                _wait_for_authority_link(driver, timeout=6, stop_event=stop_event)
+
+                if stop_event and stop_event.is_set():
+                    break
 
                 website_selectors = [
                     "a[data-item-id='authority']",
@@ -965,14 +1023,22 @@ def scrape_with_selenium(
                 results.append(result)
                 seen_in_run.add(run_key)
 
-            # Log resource stats at end of each search URL
             if mon:
                 mon.log_stats()
 
-            pause_time = random.uniform(3, 5)
-            time.sleep(pause_time)
+            _sleep_interruptible(random.uniform(3, 5), stop_event)
 
         except Exception as e:
             logger.error(f"Errore generale per {keyword} {comune_attuale}: {str(e)}")
+
+    # Cleanup driver su stop
+    if stop_event and stop_event.is_set():
+        logger.warning("[Stop] Chiusura forzata driver dopo stop_event.")
+        try:
+            if driver:
+                driver.quit()
+                driver = None
+        except Exception:
+            pass
 
     return results, driver, mon

@@ -2,6 +2,7 @@ import json
 import logging
 import csv
 import os
+import threading
 from pathlib import Path
 from typing import List, Dict, Any, Optional
 
@@ -45,10 +46,6 @@ def _save_geocode_cache(cache: dict):
 
 
 def geocode_city(city: str, state: str = "", cache: dict = None) -> tuple:
-    """
-    Ritorna (lat, lng) per una citt\u00e0, usando cache locale per evitare
-    di ri-interrogare Nominatim su citt\u00e0 gi\u00e0 geocodificate.
-    """
     cache = cache if cache is not None else _load_geocode_cache()
     key = f"{city.strip().lower()}|{state.strip().lower()}"
 
@@ -159,6 +156,7 @@ def search_contractors(
     output_csv: Optional[str] = None,
     lang: str = "en",
     state: str = "",
+    stop_event: Optional[threading.Event] = None,
 ) -> List[Dict[str, Any]]:
     already_seen: set = set()
     if output_csv:
@@ -176,6 +174,7 @@ def search_contractors(
             scroll_times=scroll_times,
             headless=headless,
             debug_screenshot=debug_screenshot,
+            stop_event=stop_event,
         )
     finally:
         if mon:

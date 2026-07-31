@@ -3,6 +3,8 @@ import logging
 import csv
 import time
 import random
+import signal
+import threading
 from pathlib import Path
 
 from src.scraper import search_contractors
@@ -11,6 +13,23 @@ from src.niches import NICHES
 
 logger = logging.getLogger(__name__)
 
+# ---------------------------------------------------------------------------
+# Graceful shutdown
+# ---------------------------------------------------------------------------
+
+stop_event = threading.Event()
+
+def _handle_stop(signum, frame):
+    logger.warning("Segnale ricevuto (%s): stop richiesto, attendi chiusura pulita...", signum)
+    stop_event.set()
+
+signal.signal(signal.SIGINT, _handle_stop)
+signal.signal(signal.SIGTERM, _handle_stop)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
 
 def build_keywords(selected_labels):
     niche_map = {label: keywords for label, keywords in NICHES}
@@ -25,13 +44,7 @@ def build_keywords(selected_labels):
 
 
 def get_max_results(popolazione: int, lang: str = "en") -> int:
-    """
-    Adatta max_results alla dimensione della citta'.
-    Per il mercato US le soglie di popolazione sono piu' alte.
-    Google Maps non mostra piu' di ~20 risultati per query nella
-    lista laterale, quindi 50 e' il massimo utile in ogni caso.
-    """
-    if lang == "en":  # US
+    if lang == "en":
         if popolazione < 50_000:
             return 20
         elif popolazione < 250_000:
@@ -40,7 +53,7 @@ def get_max_results(popolazione: int, lang: str = "en") -> int:
             return 40
         else:
             return 50
-    else:  # IT
+    else:
         if popolazione < 5_000:
             return 10
         elif popolazione < 20_000:
@@ -52,12 +65,6 @@ def get_max_results(popolazione: int, lang: str = "en") -> int:
 
 
 def load_cities(csv_path: str, state_filter: str = None, lang: str = "en"):
-    """
-    Legge il CSV delle citta'.
-
-    Modalita' US  -> colonne attese: city, state, population
-    Modalita' IT  -> colonne attese: comune, provincia, popolazione
-    """
     cities = []
     with open(csv_path, newline="", encoding="utf-8") as f:
         reader = csv.DictReader(f)
@@ -97,10 +104,6 @@ def load_cities(csv_path: str, state_filter: str = None, lang: str = "en"):
 
 
 def get_already_completed(output_csv: str) -> set:
-    """
-    Legge il CSV output esistente e restituisce il set di
-    (city.lower, keyword.lower) gia' completati (resume).
-    """
     done = set()
     path = Path(output_csv)
     if not path.exists():
@@ -164,14 +167,8 @@ def main():
     )
     parser.add_argument(
         "--max-results", type=int, default=None,
-        help=(
-            "Numero massimo di risultati per citta' (override fisso). "
-            "Se omesso, il valore viene calcolato automaticamente "
-            "in base alla popolazione della citta' (10-50 a seconda della taglia)."
-        )
     )
-    parser.add_argument("--debug-screenshot", action="store_true", default=False,
-                        help="Salva screenshot SERP per debug")
+    parser.add_argument("--debug-screenshot", action="store_true", default=False)
     parser.add_argument(
         "--log-level", default="INFO",
         choices=["DEBUG", "INFO", "WARNING", "ERROR"]
@@ -183,7 +180,6 @@ def main():
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    # Validazione nicchie
     keywords = build_keywords(args.nicchie)
     if not keywords:
         raise SystemExit(
@@ -191,7 +187,6 @@ def main():
             + "\n".join(f"  - {n[0]}" for n in NICHES)
         )
 
-    # Carica citta'
     cities_list = load_cities(args.input, state_filter=args.state, lang=args.lang)
     if not cities_list:
         raise SystemExit("Nessuna citta' trovata nel CSV con i filtri specificati.")
@@ -220,18 +215,20 @@ def main():
     total_leads = 0
 
     for idx, entry in enumerate(cities_list, 1):
+        # --- STOP CHECK ---
+        if stop_event.is_set():
+            logger.warning("[Stop] Interruzione richiesta prima di %s, esco.", entry["city"])
+            break
+
         city = entry["city"]
         state = entry["state"]
         population = entry["population"]
 
-        # Se --max-results e' passato, usa quello fisso;
-        # altrimenti calcola automaticamente dalla popolazione.
         if args.max_results is not None:
             max_results = args.max_results
         else:
             max_results = get_max_results(population, lang=args.lang)
 
-        # Resume: salta se tutte le keyword sono gia' nel CSV
         keywords_da_fare = [
             kw for kw in keywords
             if (city.lower(), kw.lower()) not in done_pairs
@@ -256,6 +253,7 @@ def main():
                 lang=args.lang,
                 state=state,
                 debug_screenshot=args.debug_screenshot,
+                stop_event=stop_event,
             )
             n = len(results)
             total_leads += n
@@ -268,13 +266,25 @@ def main():
             logger.error(f"[{idx}/{total}] Errore su {city}: {e}")
             print(f"  -> ERRORE: {e} — continuo con la prossima citta'")
 
+        if stop_event.is_set():
+            logger.warning("[Stop] stop_event impostato dopo %s, esco.", city)
+            break
+
         if idx < total:
             pause = random.uniform(args.pause_min, args.pause_max)
             logger.info(f"Pausa {pause:.1f}s prima della prossima citta'...")
-            time.sleep(pause)
+            # Sleep interrompibile: controlla stop_event ogni secondo
+            deadline = time.time() + pause
+            while time.time() < deadline:
+                if stop_event.is_set():
+                    break
+                time.sleep(min(1.0, deadline - time.time()))
 
     print(f"\n{'='*60}")
-    print(f"COMPLETATO — {total_leads} lead totali salvati in: {out_path}")
+    if stop_event.is_set():
+        print(f"INTERROTTO — {total_leads} lead salvati fino all'interruzione in: {out_path}")
+    else:
+        print(f"COMPLETATO — {total_leads} lead totali salvati in: {out_path}")
     print(f"{'='*60}\n")
 
 
