@@ -195,7 +195,8 @@ def run_parallel(
                         f.cancel()
                     # Send SIGTERM to all worker processes
                     _send_sigterm_to_workers(worker_processes)
-                    break
+                    # Return what we have so far
+                    return all_results
                     
                 wid = futures[future]
                 try:
@@ -211,6 +212,8 @@ def run_parallel(
         # Cleanup: kill any remaining worker processes
         if stop_event.is_set():
             _kill_worker_processes(worker_processes)
+    
+    return all_results
 
 
 def _send_sigterm_to_workers(process_pids):

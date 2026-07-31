@@ -193,6 +193,8 @@ def init_driver(
         # We hold the lock only for the uc.Chrome() constructor call (the
         # actual patch + process launch), then release it so other workers
         # can proceed while this worker is already running.
+        # NOTE: use_subprocess=False is critical for ProcessPoolExecutor workers
+        # to avoid issues with subprocess inheritance in multiprocessing.
         if _FILELOCK_AVAILABLE:
             _UCD_LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
             lock = _filelock_mod.FileLock(str(_UCD_LOCK_PATH), timeout=120)
@@ -201,7 +203,7 @@ def init_driver(
                 driver = uc.Chrome(
                     options=uc_options,
                     version_main=chromium_version_int if chromium_version_int else None,
-                    use_subprocess=True,
+                    use_subprocess=False,
                     suppress_welcome=True,
                 )
             logger.debug("[UCDLock] Lock rilasciato")
@@ -215,7 +217,7 @@ def init_driver(
             driver = uc.Chrome(
                 options=uc_options,
                 version_main=chromium_version_int if chromium_version_int else None,
-                use_subprocess=True,
+                use_subprocess=False,
                 suppress_welcome=True,
             )
         logger.info("Chrome avviato con undetected_chromedriver")
@@ -230,7 +232,8 @@ def init_driver(
             chrome_options.add_argument("--window-position=0,0")
         for flag in _COMMON_FLAGS:
             chrome_options.add_argument(flag)
-        chrome_options.add_argument("--remote-debugging-port=9222")
+        # NOTE: Removed --remote-debugging-port to avoid connection issues
+        # in parallel mode where workers don't need remote debugging
         if chromium_binary:
             chrome_options.binary_location = chromium_binary
 
