@@ -169,6 +169,8 @@ def init_driver(
         f"--lang={lang}",
         "--disable-blink-features=AutomationControlled",
         "--exclude-switches=enable-automation",
+        "--remote-debugging-port=0",
+        "--disable-remote-debugging",
     ]
     if _spoof_ua:
         _COMMON_FLAGS.append(f"--user-agent={_spoof_ua}")
