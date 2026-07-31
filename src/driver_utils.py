@@ -3,6 +3,8 @@ import os
 import shutil
 import subprocess
 import re
+import socket
+import time
 from typing import Tuple
 
 from selenium import webdriver
@@ -15,6 +17,67 @@ import undetected_chromedriver as uc
 from src.resource_monitor import ChromeResourceMonitor
 
 logger = logging.getLogger(__name__)
+
+
+def _wait_driver_port_ready(driver, timeout: float = 15.0, interval: float = 0.25) -> bool:
+    """Polling attivo sulla porta del servizio ChromeDriver.
+
+    Ritorna True appena la porta accetta connessioni TCP, False se scade il timeout.
+    Evita il race condition in cui Selenium invia comandi prima che ChromeDriver
+    sia davvero in ascolto (errno 111 Connection refused).
+    """
+    port = getattr(driver.service, "port", None)
+    if not port:
+        logger.warning("_wait_driver_port_ready: porta non disponibile, skip polling.")
+        return False
+
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            with socket.create_connection(("127.0.0.1", port), timeout=1.0):
+                return True
+        except OSError:
+            time.sleep(interval)
+
+    logger.error(f"_wait_driver_port_ready: timeout {timeout}s sulla porta {port}.")
+    return False
+
+
+def _build_uc_driver(uc_options, chromium_version_int) -> webdriver.Chrome:
+    """Tenta di creare un driver uc.Chrome con retry (max 3 tentativi, backoff 1.5s).
+
+    Ogni tentativo esegue anche il polling sulla porta prima di restituire il driver.
+    Solleva l'ultima eccezione se tutti i tentativi falliscono.
+    """
+    last_exc: Exception = RuntimeError("Nessun tentativo eseguito")
+    for attempt in range(3):
+        driver = None
+        try:
+            driver = uc.Chrome(
+                options=uc_options,
+                version_main=chromium_version_int if chromium_version_int else None,
+                use_subprocess=True,
+                suppress_welcome=True,
+            )
+            if not _wait_driver_port_ready(driver, timeout=15):
+                raise RuntimeError(
+                    f"ChromeDriver port not ready after startup (attempt {attempt + 1})"
+                )
+            logger.info(f"Chrome avviato con undetected_chromedriver (tentativo {attempt + 1})")
+            return driver
+        except Exception as e:
+            last_exc = e
+            logger.warning(
+                f"Tentativo {attempt + 1}/3 undetected_chromedriver fallito: {e}"
+            )
+            if driver is not None:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+            time.sleep(1.5 * (attempt + 1))
+
+    raise last_exc
 
 
 def init_driver(
@@ -106,15 +169,10 @@ def init_driver(
         if chromium_binary:
             uc_options.binary_location = chromium_binary
 
-        driver = uc.Chrome(
-            options=uc_options,
-            version_main=chromium_version_int if chromium_version_int else None,
-            use_subprocess=True,
-            suppress_welcome=True,
-        )
-        logger.info("Chrome avviato con undetected_chromedriver")
+        driver = _build_uc_driver(uc_options, chromium_version_int)
+
     except Exception as uc_error:
-        logger.warning(f"undetected_chromedriver fallito: {uc_error} — provo ChromeDriverManager...")
+        logger.warning(f"undetected_chromedriver fallito dopo tutti i retry: {uc_error} — provo ChromeDriverManager...")
 
     if driver is None:
         chrome_options = Options()
@@ -158,6 +216,13 @@ def init_driver(
             ).install()
         )
         driver = webdriver.Chrome(service=service, options=chrome_options)
+        # Polling porta anche sul fallback ChromeDriverManager
+        if not _wait_driver_port_ready(driver, timeout=15):
+            try:
+                driver.quit()
+            except Exception:
+                pass
+            raise RuntimeError("ChromeDriver (fallback) port not ready after startup")
         driver.execute_script(
             "Object.defineProperty(navigator, 'webdriver', {get: () => undefined})"
         )
