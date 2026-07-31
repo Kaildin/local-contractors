@@ -105,6 +105,12 @@ def worker_scrape_cities(
         max_results = get_max_results(population, lang=lang)
 
         logger.info(f"[W{worker_id}] Scraping '{city}' ({state}) – max_results={max_results}")
+        
+        # Check stop flag before starting each city
+        if _STOP_REQUESTED:
+            logger.warning(f"[W{worker_id}] Stop richiesto prima di {city} — interrompo")
+            break
+            
         try:
             results = search_contractors(
                 comune=city,

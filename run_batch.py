@@ -3,6 +3,10 @@ import logging
 import csv
 import time
 import random
+import signal
+import threading
+import os
+import sys
 from math import ceil
 from pathlib import Path
 
@@ -11,6 +15,23 @@ from src.niches import NICHES
 
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Graceful shutdown
+# ---------------------------------------------------------------------------
+
+stop_event = threading.Event()
+
+
+def _handle_stop(signum, frame):
+    """Handler per SIGINT (Ctrl+C) e SIGTERM (kill)."""
+    logger.warning("Segnale ricevuto (%s): stop richiesto, attendi chiusura pulita...", signum)
+    stop_event.set()
+
+
+# Registra handler per i segnali
+signal.signal(signal.SIGINT, _handle_stop)
+signal.signal(signal.SIGTERM, _handle_stop)
 
 
 def build_keywords(selected_labels):
@@ -137,36 +158,146 @@ def run_parallel(
     )
 
     all_results = []
-    with ProcessPoolExecutor(max_workers=actual_workers) as executor:
-        futures = {
-            executor.submit(
-                worker_scrape_cities,
-                chunk,
-                keywords,
-                lang=lang,
-                headless=headless,
-                scroll_times=scroll_times,
-                min_reviews=min_reviews,
-                max_reviews=max_reviews,
-                check_website_alive=check_website_alive,
-                debug_screenshot=debug_screenshot,
-                output_csv=output_csv,
-                worker_id=idx,
-            ): idx
-            for idx, chunk in enumerate(chunks)
-        }
-        for future in as_completed(futures):
-            wid = futures[future]
-            try:
-                chunk_results = future.result()
-                logger.info(f"[Parallel] Worker {wid} completato: {len(chunk_results)} lead")
-                print(f"  [W{wid}] completato -> {len(chunk_results)} lead")
-                all_results.extend(chunk_results)
-            except Exception as exc:
-                logger.error(f"[Parallel] Worker {wid} fallito: {exc}")
-                print(f"  [W{wid}] ERRORE: {exc}")
+    worker_processes = []
+    executor = None
+    
+    try:
+        with ProcessPoolExecutor(max_workers=actual_workers) as executor:
+            futures = {
+                executor.submit(
+                    worker_scrape_cities,
+                    chunk,
+                    keywords,
+                    lang=lang,
+                    headless=headless,
+                    scroll_times=scroll_times,
+                    min_reviews=min_reviews,
+                    max_reviews=max_reviews,
+                    check_website_alive=check_website_alive,
+                    debug_screenshot=debug_screenshot,
+                    output_csv=output_csv,
+                    worker_id=idx,
+                ): idx
+                for idx, chunk in enumerate(chunks)
+            }
+            
+            # Store process PIDs for emergency cleanup
+            if hasattr(executor, '_processes'):
+                for proc in executor._processes.values():
+                    worker_processes.append(proc.pid)
+            
+            for future in as_completed(futures):
+                # Check if stop was requested
+                if stop_event.is_set():
+                    logger.warning("[Parallel] Stop richiesto, interrompo attesa risultati...")
+                    # Cancel all pending futures
+                    for f in futures:
+                        f.cancel()
+                    # Send SIGTERM to all worker processes
+                    _send_sigterm_to_workers(worker_processes)
+                    break
+                    
+                wid = futures[future]
+                try:
+                    chunk_results = future.result()
+                    logger.info(f"[Parallel] Worker {wid} completato: {len(chunk_results)} lead")
+                    print(f"  [W{wid}] completato -> {len(chunk_results)} lead")
+                    all_results.extend(chunk_results)
+                except Exception as exc:
+                    logger.error(f"[Parallel] Worker {wid} fallito: {exc}")
+                    print(f"  [W{wid}] ERRORE: {exc}")
+    
+    finally:
+        # Cleanup: kill any remaining worker processes
+        if stop_event.is_set():
+            _kill_worker_processes(worker_processes)
 
-    return all_results
+
+def _send_sigterm_to_workers(process_pids):
+    """Send SIGTERM to worker processes to request graceful shutdown."""
+    for pid in process_pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            logger.info(f"[Cleanup] Inviato SIGTERM a worker PID={pid}")
+        except ProcessLookupError:
+            pass  # Process already dead
+        except Exception as e:
+            logger.warning(f"[Cleanup] Errore invio SIGTERM a {pid}: {e}")
+
+
+def _kill_worker_processes(process_pids):
+    """Kill worker processes and their Chrome children."""
+    try:
+        import psutil
+        for pid in process_pids:
+            try:
+                proc = psutil.Process(pid)
+                # Kill all children first (Chrome processes)
+                for child in proc.children(recursive=True):
+                    try:
+                        child.terminate()
+                    except psutil.NoSuchProcess:
+                        pass
+                # Then kill the worker process
+                proc.terminate()
+                # Give it a moment to terminate gracefully
+                try:
+                    proc.wait(timeout=5)
+                except psutil.TimeoutExpired:
+                    proc.kill()
+            except psutil.NoSuchProcess:
+                pass
+            except Exception as e:
+                logger.warning(f"[Cleanup] Errore kill processo {pid}: {e}")
+    except ImportError:
+        logger.warning("[Cleanup] psutil non disponibile, impossibile killare processi worker")
+
+
+def _cleanup_chrome_processes():
+    """Kill all orphan Chrome/Chromium processes."""
+    try:
+        import psutil
+        chrome_keywords = ['chrome', 'chromium', 'chromedriver']
+        killed = 0
+        for proc in psutil.process_iter(['pid', 'name', 'cmdline']):
+            try:
+                name = proc.info['name'] or ''
+                cmdline = proc.info['cmdline'] or []
+                if any(kw in name.lower() for kw in chrome_keywords):
+                    # Skip if it's our own process or parent
+                    if proc.pid == os.getpid():
+                        continue
+                    # Check if it's a Chrome process
+                    if 'chrome' in name.lower() or 'chromium' in name.lower():
+                        try:
+                            proc.terminate()
+                            killed += 1
+                            logger.info(f"[Cleanup] Killato Chrome processo PID={proc.pid}")
+                        except psutil.NoSuchProcess:
+                            pass
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                pass
+        if killed > 0:
+            logger.info(f"[Cleanup] Killati {killed} processi Chrome orfani")
+    except ImportError:
+        logger.debug("[Cleanup] psutil non disponibile per cleanup Chrome")
+    except Exception as e:
+        logger.warning(f"[Cleanup] Errore durante pulizia Chrome: {e}")
+
+
+# Register cleanup on exit
+def _exit_handler():
+    """Cleanup handler called on script exit."""
+    if stop_event.is_set():
+        logger.warning("Esecuzione interrotta, pulizia processi in corso...")
+        _cleanup_chrome_processes()
+
+
+import atexit
+atexit.register(_exit_handler)
+
+import atexit
+atexit.register(_exit_handler)
 
 
 def main():
@@ -326,6 +457,11 @@ def main():
     total_leads = 0
 
     for idx, entry in enumerate(cities_todo, 1):
+        # --- STOP CHECK ---
+        if stop_event.is_set():
+            logger.warning("[Serial] Stop richiesto, interrompo dopo questa citta'")
+            break
+            
         city       = entry["city"]
         state      = entry["state"]
         population = entry["population"]

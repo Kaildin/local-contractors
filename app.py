@@ -6,6 +6,8 @@ Requires: PyQt5   (pip install PyQt5)
 import sys
 import subprocess
 import shlex
+import signal
+import os
 from pathlib import Path
 
 from PyQt5.QtWidgets import (
@@ -168,7 +170,27 @@ class Runner(QThread):
 
     def stop(self):
         if self._proc and self._proc.poll() is None:
+            # Try terminate first
             self._proc.terminate()
+            # Wait a bit for graceful shutdown
+            try:
+                self._proc.wait(timeout=5)
+            except subprocess.TimeoutExpired:
+                # Force kill if still running
+                self._proc.kill()
+            # Also send SIGTERM to the process group
+            try:
+                os.killpg(os.getpgid(self._proc.pid), signal.SIGTERM)
+            except (OSError, ProcessLookupError, AttributeError):
+                pass
+            # Give it another moment
+            try:
+                self._proc.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                try:
+                    os.killpg(os.getpgid(self._proc.pid), signal.SIGKILL)
+                except (OSError, ProcessLookupError, AttributeError):
+                    pass
 
 
 # ── niche checkbox grid ──────────────────────────────────────────
