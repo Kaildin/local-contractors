@@ -355,6 +355,10 @@ def main():
     parser.add_argument("--debug-screenshot", action="store_true", default=False,
                         help="Salva screenshot SERP per debug")
     parser.add_argument(
+        "--max-places-per-driver", type=int, default=25,
+        help="Massimo numero di place da elaborare con lo stesso driver prima di riciclarlo (default: 25)"
+    )
+    parser.add_argument(
         "--workers", type=int, default=1,
         help=(
             "Numero di processi paralleli (default: 1 = seriale). "
@@ -426,6 +430,7 @@ def main():
         print(f"  Pausa tra citta'       : {args.pause_min}-{args.pause_max}s")
     else:
         print(f"  Workers                : {args.workers}")
+    print(f"  Max place/driver      : {args.max_places_per_driver}")
     print(f"{'='*60}\n")
 
     if not cities_todo:
@@ -490,6 +495,7 @@ def main():
                 lang=args.lang,
                 state=state,
                 debug_screenshot=args.debug_screenshot,
+                max_places_per_driver=args.max_places_per_driver,
             )
             n = len(results)
             total_leads += n

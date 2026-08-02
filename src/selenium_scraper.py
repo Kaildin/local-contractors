@@ -736,11 +736,13 @@ def scrape_with_selenium(
     headless: bool = True,
     lang: str = "en",
     debug_screenshot: bool = False,
+    max_places_per_driver: int = 25,
 ):
     cfg = _get_lang_cfg(lang)
     results = []
     seen_in_run: set = set()
     mon = None  # will be set on first driver init
+    places_processed_with_current_driver = 0
 
     def _init_driver_with_label(label: str = ""):
         """Helper to init driver and keep mon in closure."""
@@ -1086,6 +1088,30 @@ def scrape_with_selenium(
 
                 results.append(result)
                 seen_in_run.add(run_key)
+                places_processed_with_current_driver += 1
+
+                # Chiudi tutti i tab aperti tranne il primo per liberare memoria
+                if len(driver.window_handles) > 1:
+                    try:
+                        for handle in driver.window_handles[1:]:
+                            driver.switch_to.window(handle)
+                            driver.close()
+                        driver.switch_to.window(driver.window_handles[0])
+                    except Exception as e:
+                        logger.debug(f"[Tab Cleanup] Errore chiusura tab: {e}")
+
+                # Riciclo del driver ogni max_places_per_driver place
+                if max_places_per_driver > 0 and places_processed_with_current_driver >= max_places_per_driver:
+                    logger.info(f"[Driver Recycle] Riciclo driver dopo {places_processed_with_current_driver} place")
+                    try:
+                        if mon:
+                            mon.stop()
+                        if driver:
+                            driver.quit()
+                    except Exception:
+                        pass
+                    driver = _init_driver_with_label(worker_label)
+                    places_processed_with_current_driver = 0
 
             if mon:
                 mon.log_stats()

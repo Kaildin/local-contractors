@@ -185,6 +185,7 @@ def search_contractors(
     output_csv: Optional[str] = None,
     lang: str = "en",
     state: str = "",
+    max_places_per_driver: int = 25,
 ) -> List[Dict[str, Any]]:
     already_seen: set = set()
     if output_csv:
@@ -202,6 +203,7 @@ def search_contractors(
             scroll_times=scroll_times,
             headless=headless,
             debug_screenshot=debug_screenshot,
+            max_places_per_driver=max_places_per_driver,
         )
     finally:
         if mon:

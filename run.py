@@ -29,6 +29,10 @@ def main():
     parser.add_argument("--output", default="output/debug_run.csv")
     parser.add_argument("--debug-screenshot", action="store_true", default=False,
                         help="Salva screenshot SERP per debug")
+    parser.add_argument(
+        "--max-places-per-driver", type=int, default=25,
+        help="Massimo numero di place da elaborare con lo stesso driver prima di riciclarlo (default: 25)"
+    )
     parser.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])
     args = parser.parse_args()
@@ -54,6 +58,7 @@ def main():
     print(f"Headless: {args.headless} | HTTP check: {not args.no_http_check} | Scroll: {args.scroll_times}")
     print(f"lang: {args.lang}")
     print(f"Max risultati per keyword: {args.max_results}")
+    print(f"Max place/driver: {args.max_places_per_driver}")
     print(f"Output CSV: {out_path}\n")
 
     results = search_contractors(
@@ -68,6 +73,7 @@ def main():
         max_results=args.max_results,
         output_csv=out_path,
         debug_screenshot=args.debug_screenshot,
+        max_places_per_driver=args.max_places_per_driver,
     )
 
     print(f"\n{'='*60}")
