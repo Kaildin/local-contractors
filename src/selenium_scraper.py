@@ -3,22 +3,82 @@ import time
 import random
 import re
 import csv
+import socket
 
 import os
 import datetime
 from urllib.parse import urlparse, parse_qs, quote_plus
-
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.webdriver.common.action_chains import ActionChains
+from selenium.common.exceptions import WebDriverException
 
 from .driver_utils import init_driver
 from .text_utils import clean_extracted_text
 
 logger = logging.getLogger(__name__)
+
+# ---------------------------------------------------------------------------
+# Driver health helpers
+# ---------------------------------------------------------------------------
+
+def _is_driver_alive(driver):
+    """Controlla se il driver e ancora vivo e in grado di rispondere."""
+    if driver is None:
+        return False
+    try:
+        # Prova un operazione leggera per verificare la connessione
+        _ = driver.current_url
+        return True
+    except (WebDriverException, ConnectionRefusedError, socket.timeout, OSError, AttributeError):
+        return False
+
+
+def _safe_get(driver, mon, worker_label, url, max_retries=3):
+    """Esegue driver.get() con retry se il driver e morto o non risponde.
+    
+    Se il driver non e vivo, lo ricrea e riprova l operazione.
+    Solleva RuntimeError se non riesce dopo max_retries tentativi.
+    """
+    for attempt in range(max_retries):
+        try:
+            if not _is_driver_alive(driver):
+                logger.warning(
+                    f"[Driver] Driver non vivo, ricreazione (tentativo {attempt + 1}/{max_retries})"
+                )
+                if mon:
+                    mon.stop()
+                if driver:
+                    try:
+                        driver.quit()
+                    except Exception:
+                        pass
+                driver = _init_driver_with_label(worker_label)
+                if mon:
+                    mon.start()
+                # Imposta timeout per evitare blocchi infiniti
+                driver.set_page_load_timeout(30)
+                driver.set_script_timeout(30)
+            driver.get(url)
+            return driver
+        except (WebDriverException, ConnectionRefusedError, socket.timeout, OSError) as e:
+            logger.warning(
+                f"[Driver] Errore navigazione (tentativo {attempt + 1}/{max_retries}): {e}"
+            )
+            if mon:
+                mon.stop()
+            if driver:
+                try:
+                    driver.quit()
+                except Exception:
+                    pass
+            driver = None
+            time.sleep(2)  # Attendi prima di riprovare
+    raise RuntimeError(f"Impossibile navigare a {url} dopo {max_retries} tentativi")
+
 
 # ---------------------------------------------------------------------------
 # lang helpers
@@ -461,10 +521,24 @@ def _name_matches_title(name: str, title: str) -> bool:
     return (matches / len(name_words)) >= 0.4
 
 
-def _wait_for_place_page(driver, expected_name: str, timeout: int = 15) -> bool:
+def _wait_for_place_page(driver, expected_name: str, timeout: int = 15, mon=None, worker_label: str = "") -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
+            if not _is_driver_alive(driver):
+                logger.warning(f"[Wait] Driver morto durante attesa, ricreazione...")
+                if mon:
+                    mon.stop()
+                if driver:
+                    try:
+                        driver.quit()
+                    except Exception:
+                        pass
+                driver = _init_driver_with_label(worker_label)
+                if mon:
+                    mon.start()
+                driver.set_page_load_timeout(30)
+                driver.set_script_timeout(30)
             if "/maps/place/" not in driver.current_url:
                 time.sleep(0.5)
                 continue
@@ -490,10 +564,24 @@ def _wait_for_place_page(driver, expected_name: str, timeout: int = 15) -> bool:
     return False
 
 
-def _wait_for_authority_link(driver, timeout: int = 6) -> bool:
+def _wait_for_authority_link(driver, timeout: int = 6, mon=None, worker_label: str = "") -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
+            if not _is_driver_alive(driver):
+                logger.warning(f"[Wait] Driver morto durante attesa authority link, ricreazione...")
+                if mon:
+                    mon.stop()
+                if driver:
+                    try:
+                        driver.quit()
+                    except Exception:
+                        pass
+                driver = _init_driver_with_label(worker_label)
+                if mon:
+                    mon.start()
+                driver.set_page_load_timeout(30)
+                driver.set_script_timeout(30)
             els = driver.find_elements(By.CSS_SELECTOR, "a[data-item-id='authority']")
             if els:
                 href = els[0].get_attribute("href") or ""
@@ -510,7 +598,7 @@ def _wait_for_authority_link(driver, timeout: int = 6) -> bool:
     return False
 
 
-def _navigate_to_place(driver, name: str, place_href: str, lang: str = "en"):
+def _navigate_to_place(driver, mon, name: str, place_href: str, lang: str = "en", worker_label: str = ""):
     """
     Naviga alla scheda Google Maps completa di un place evitando la limited
     view (maps/preview/place) che Chrome headless ottiene navigando
@@ -604,7 +692,7 @@ def _navigate_to_place(driver, name: str, place_href: str, lang: str = "en"):
     )
     logger.info(f"[Nav] STEP 1 — Google Search SERP: {google_search_url}")
     try:
-        driver.get(google_search_url)
+        driver = _safe_get(driver, mon, worker_label, google_search_url)
         time.sleep(3)
 
         # Accetta cookie se compare il dialog
@@ -645,7 +733,7 @@ def _navigate_to_place(driver, name: str, place_href: str, lang: str = "en"):
                 continue
 
         if maps_place_link:
-            driver.get(maps_place_link)
+            driver = _safe_get(driver, mon, worker_label, maps_place_link)
             time.sleep(5)
             logger.info(f"[Nav] STEP 1 URL dopo navigazione SERP link: {driver.current_url}")
             if "/maps/place/" in driver.current_url and _has_review_signals():
@@ -670,7 +758,7 @@ def _navigate_to_place(driver, name: str, place_href: str, lang: str = "en"):
     # STEP 2: warmup + maps/search/ diretto
     # ------------------------------------------------------------------
     try:
-        driver.get("https://www.google.com")
+        driver = _safe_get(driver, mon, worker_label, "https://www.google.com")
         time.sleep(2)
         logger.info("[Nav] STEP 2 warmup completato")
     except Exception as e:
@@ -682,7 +770,7 @@ def _navigate_to_place(driver, name: str, place_href: str, lang: str = "en"):
     )
     logger.info(f"[Nav] STEP 2 — maps/search/: {search_url}")
     try:
-        driver.get(search_url)
+        driver = _safe_get(driver, mon, worker_label, search_url)
         time.sleep(5)
         logger.info(f"[Nav] STEP 2 URL dopo search: {driver.current_url}")
     except Exception as e:
@@ -716,12 +804,12 @@ def _navigate_to_place(driver, name: str, place_href: str, lang: str = "en"):
     # ------------------------------------------------------------------
     logger.info("[Nav] STEP 4 — fallback su URL diretto")
     try:
-        driver.get(place_href)
+        driver = _safe_get(driver, mon, worker_label, place_href)
         time.sleep(4)
         logger.info(f"[Nav] STEP 4 URL dopo fallback diretto: {driver.current_url}")
     except Exception as e:
         logger.error(f"[Nav] STEP 4 fallback diretto fallito: {e}")
-        raise
+    return driver
 
 
 # ---------------------------------------------------------------------------
@@ -783,7 +871,7 @@ def scrape_with_selenium(
                 try:
                     if driver is None:
                         driver = _init_driver_with_label(worker_label)
-                    driver.get(url)
+                    driver = _safe_get(driver, mon, worker_label, url)
                     nav_success = True
                     break
                 except Exception as e_nav:
@@ -919,12 +1007,12 @@ def scrape_with_selenium(
 
                 logger.info(f"Navigazione scheda con bypass limited view: {name}")
                 try:
-                    _navigate_to_place(driver, name, place_href, lang=lang)
+                    driver = _navigate_to_place(driver, mon, name, place_href, lang=lang, worker_label=worker_label)
                 except Exception as e_nav:
                     logger.error(f"Errore navigazione scheda '{name}': {e_nav}")
                     continue
 
-                panel_ready = _wait_for_place_page(driver, expected_name=name, timeout=15)
+                panel_ready = _wait_for_place_page(driver, expected_name=name, timeout=15, mon=mon, worker_label=worker_label)
                 if not panel_ready:
                     logger.warning(f"[Skip] Scheda non caricata per '{name}', salto.")
                     continue
@@ -1033,7 +1121,7 @@ def scrape_with_selenium(
                     except Exception:
                         continue
 
-                _wait_for_authority_link(driver, timeout=6)
+                _wait_for_authority_link(driver, timeout=6, mon=mon, worker_label=worker_label)
 
                 website_selectors = [
                     "a[data-item-id='authority']",
