@@ -8,6 +8,7 @@ import socket
 import os
 import datetime
 from urllib.parse import urlparse, parse_qs, quote_plus
+from typing import Optional, Callable
 
 from selenium import webdriver
 from selenium.webdriver.common.by import By
@@ -30,17 +31,17 @@ def _is_driver_alive(driver):
     if driver is None:
         return False
     try:
-        # Prova un operazione leggera per verificare la connessione
         _ = driver.current_url
         return True
     except (WebDriverException, ConnectionRefusedError, socket.timeout, OSError, AttributeError):
         return False
 
 
-def _safe_get(driver, mon, worker_label, url, max_retries=3):
+def _safe_get(driver, mon, worker_label, url, max_retries=3, _driver_factory=None):
     """Esegue driver.get() con retry se il driver e morto o non risponde.
-    
-    Se il driver non e vivo, lo ricrea e riprova l operazione.
+
+    Se il driver non e vivo, lo ricrea usando _driver_factory (se fornita)
+    oppure _init_driver_with_label dalla closure esterna.
     Solleva RuntimeError se non riesce dopo max_retries tentativi.
     """
     for attempt in range(max_retries):
@@ -56,10 +57,12 @@ def _safe_get(driver, mon, worker_label, url, max_retries=3):
                         driver.quit()
                     except Exception:
                         pass
-                driver = _init_driver_with_label(worker_label)
+                if _driver_factory:
+                    driver = _driver_factory(worker_label)
+                else:
+                    driver = _init_driver_with_label_fallback(worker_label)
                 if mon:
                     mon.start()
-                # Imposta timeout per evitare blocchi infiniti
                 driver.set_page_load_timeout(30)
                 driver.set_script_timeout(30)
             driver.get(url)
@@ -76,8 +79,14 @@ def _safe_get(driver, mon, worker_label, url, max_retries=3):
                 except Exception:
                     pass
             driver = None
-            time.sleep(2)  # Attendi prima di riprovare
+            time.sleep(2)
     raise RuntimeError(f"Impossibile navigare a {url} dopo {max_retries} tentativi")
+
+
+def _init_driver_with_label_fallback(label: str = ""):
+    """Fallback seriale usato solo quando nessuna factory e' disponibile."""
+    _driver, _ = init_driver(headless=True, lang="en-US,en", worker_label=label)
+    return _driver
 
 
 # ---------------------------------------------------------------------------
@@ -151,16 +160,6 @@ def _save_serp_screenshot(driver, *, comune: str, keyword: str, scroll_idx: int)
 
 
 def _dump_serp_names_csv(place_urls: list, *, comune: str, keyword: str) -> str:
-    """
-    Scrive un CSV temporaneo in debug/ con i nomi dei business estratti
-    dalla pagina dei risultati SERP, prima di navigare nelle singole schede.
-
-    Colonne: index, nome, maps_href
-    Nome file: debug/serp_names_<comune>_<keyword>_<timestamp>.csv
-
-    Utile per verificare quanti/quali risultati lo scroll ha caricato
-    senza aspettare l'intero scraping delle schede.
-    """
     try:
         out_dir = "debug"
         os.makedirs(out_dir, exist_ok=True)
@@ -268,14 +267,6 @@ def _scroll_results_panel(
     stale_limit: int = 6,
     debug_screenshot: bool = False,
 ):
-    """
-    Scrolla il pannello risultati Google Maps fino alla fine della lista.
-
-    Si ferma quando:
-      1. Viene rilevato l'elemento di fine lista GMaps con testo riconoscibile.
-      2. Il conteggio risultati rimane invariato per `stale_limit` scroll
-         consecutivi DOPO attesa adattiva (fino a 2.5s per burst tardivi).
-    """
     END_OF_LIST_SELECTORS = [
         "div.HlvSq",
         "span.HlvSq",
@@ -395,10 +386,6 @@ def _extract_place_url_from_element(element) -> str:
 
 
 def _extract_num_recensioni(driver) -> int:
-    """
-    Legge il numero di recensioni dalla scheda Google Maps.
-    """
-
     try:
         body_src = driver.page_source
 
@@ -521,7 +508,7 @@ def _name_matches_title(name: str, title: str) -> bool:
     return (matches / len(name_words)) >= 0.4
 
 
-def _wait_for_place_page(driver, expected_name: str, timeout: int = 15, mon=None, worker_label: str = "") -> bool:
+def _wait_for_place_page(driver, expected_name: str, timeout: int = 15, mon=None, worker_label: str = "", _driver_factory=None) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -534,7 +521,10 @@ def _wait_for_place_page(driver, expected_name: str, timeout: int = 15, mon=None
                         driver.quit()
                     except Exception:
                         pass
-                driver = _init_driver_with_label(worker_label)
+                if _driver_factory:
+                    driver = _driver_factory(worker_label)
+                else:
+                    driver = _init_driver_with_label_fallback(worker_label)
                 if mon:
                     mon.start()
                 driver.set_page_load_timeout(30)
@@ -564,7 +554,7 @@ def _wait_for_place_page(driver, expected_name: str, timeout: int = 15, mon=None
     return False
 
 
-def _wait_for_authority_link(driver, timeout: int = 6, mon=None, worker_label: str = "") -> bool:
+def _wait_for_authority_link(driver, timeout: int = 6, mon=None, worker_label: str = "", _driver_factory=None) -> bool:
     deadline = time.time() + timeout
     while time.time() < deadline:
         try:
@@ -577,7 +567,10 @@ def _wait_for_authority_link(driver, timeout: int = 6, mon=None, worker_label: s
                         driver.quit()
                     except Exception:
                         pass
-                driver = _init_driver_with_label(worker_label)
+                if _driver_factory:
+                    driver = _driver_factory(worker_label)
+                else:
+                    driver = _init_driver_with_label_fallback(worker_label)
                 if mon:
                     mon.start()
                 driver.set_page_load_timeout(30)
@@ -598,24 +591,22 @@ def _wait_for_authority_link(driver, timeout: int = 6, mon=None, worker_label: s
     return False
 
 
-def _navigate_to_place(driver, mon, name: str, place_href: str, lang: str = "en", worker_label: str = ""):
+def _navigate_to_place(driver, mon, name: str, place_href: str, lang: str = "en", worker_label: str = "", _driver_factory=None):
     """
-    Naviga alla scheda Google Maps completa di un place evitando la limited
-    view (maps/preview/place) che Chrome headless ottiene navigando
-    direttamente a Google Maps.
+    Naviga alla scheda Google Maps completa di un place.
 
-    Strategia (in ordine):
-      1. Google Search SERP  — cerca '{name} google maps' su google.com/search,
-         trova il primo link a maps.google.com/maps/place/ e lo naviga.
-         Questo e' il flow piu' affidabile: la scheda viene servita come se
-         arrivasse da una ricerca organica, senza limited view.
-      2. maps/search/ diretto — fallback se la SERP non trova link Maps.
-      3. Click dal primo risultato della lista Maps (gia' presente).
-      4. URL diretto (place_href) — ultimo resort.
+    IMPORTANTE: questa funzione ritorna SEMPRE driver esplicitamente in ogni
+    branch (STEP 1/2/3/4). La versione precedente faceva return implicito (None)
+    nei branch STEP 1/2/3, causando driver=None nel chiamante e ricreazioni
+    spurie con il driver seriale (undetected_chromedriver) anche in contesto
+    parallelo.
     """
     cfg = _get_lang_cfg(lang)
     hl = cfg["hl"]
     gl = cfg["gl"]
+
+    def _safe_get_local(d, url):
+        return _safe_get(d, mon, worker_label, url, _driver_factory=_driver_factory)
 
     try:
         os.makedirs("debug", exist_ok=True)
@@ -636,11 +627,6 @@ def _navigate_to_place(driver, mon, name: str, place_href: str, lang: str = "en"
         ]
         for sel in review_selectors:
             try:
-                # NOTE: is_displayed() is intentionally NOT used here.
-                # On Linux headless without a GPU compositor, elements exist
-                # in the DOM but report is_displayed()=False even when fully
-                # loaded. Checking presence alone is sufficient and consistent
-                # across platforms.
                 els = driver.find_elements(By.CSS_SELECTOR, sel)
                 if els:
                     logger.info(f"[Nav] Segnale recensioni trovato con selector: {sel}")
@@ -692,10 +678,9 @@ def _navigate_to_place(driver, mon, name: str, place_href: str, lang: str = "en"
     )
     logger.info(f"[Nav] STEP 1 — Google Search SERP: {google_search_url}")
     try:
-        driver = _safe_get(driver, mon, worker_label, google_search_url)
+        driver = _safe_get_local(driver, google_search_url)
         time.sleep(3)
 
-        # Accetta cookie se compare il dialog
         cookie_selectors = [
             (By.ID, "L2AGLb"),
             (By.CSS_SELECTOR, ".tHlp8d"),
@@ -711,7 +696,6 @@ def _navigate_to_place(driver, mon, name: str, place_href: str, lang: str = "en"
             except Exception:
                 pass
 
-        # Cerca link a maps/place/ nei risultati SERP
         maps_place_link = None
         candidate_selectors = [
             "a[href*='maps.google.com/maps/place/']",
@@ -733,21 +717,20 @@ def _navigate_to_place(driver, mon, name: str, place_href: str, lang: str = "en"
                 continue
 
         if maps_place_link:
-            driver = _safe_get(driver, mon, worker_label, maps_place_link)
+            driver = _safe_get_local(driver, maps_place_link)
             time.sleep(5)
             logger.info(f"[Nav] STEP 1 URL dopo navigazione SERP link: {driver.current_url}")
             if "/maps/place/" in driver.current_url and _has_review_signals():
                 logger.info("[Nav] STEP 1 OK — scheda place completa via SERP")
-                return
-            # Potrebbe servire un attimo in piu' su Linux headless
+                return driver  # FIX: return driver esplicito
             for _ in range(6):
                 if _has_review_signals():
                     logger.info("[Nav] STEP 1 OK — review signals apparsi dopo attesa")
-                    return
+                    return driver  # FIX: return driver esplicito
                 time.sleep(1)
             logger.info("[Nav] STEP 1 — su place page ma senza review signals, continuo")
             if "/maps/place/" in driver.current_url:
-                return  # meglio fermarsi qui che tornare alla limited view
+                return driver  # FIX: return driver esplicito invece di None implicito
         else:
             logger.info("[Nav] STEP 1 — nessun link maps/place/ trovato nella SERP")
 
@@ -758,7 +741,7 @@ def _navigate_to_place(driver, mon, name: str, place_href: str, lang: str = "en"
     # STEP 2: warmup + maps/search/ diretto
     # ------------------------------------------------------------------
     try:
-        driver = _safe_get(driver, mon, worker_label, "https://www.google.com")
+        driver = _safe_get_local(driver, "https://www.google.com")
         time.sleep(2)
         logger.info("[Nav] STEP 2 warmup completato")
     except Exception as e:
@@ -770,7 +753,7 @@ def _navigate_to_place(driver, mon, name: str, place_href: str, lang: str = "en"
     )
     logger.info(f"[Nav] STEP 2 — maps/search/: {search_url}")
     try:
-        driver = _safe_get(driver, mon, worker_label, search_url)
+        driver = _safe_get_local(driver, search_url)
         time.sleep(5)
         logger.info(f"[Nav] STEP 2 URL dopo search: {driver.current_url}")
     except Exception as e:
@@ -778,7 +761,7 @@ def _navigate_to_place(driver, mon, name: str, place_href: str, lang: str = "en"
 
     if "/maps/place/" in driver.current_url and _has_review_signals():
         logger.info("[Nav] STEP 2 OK — place page valida via maps/search/")
-        return
+        return driver  # FIX: return driver esplicito
 
     # ------------------------------------------------------------------
     # STEP 3: click dal primo risultato della lista Maps
@@ -789,14 +772,14 @@ def _navigate_to_place(driver, mon, name: str, place_href: str, lang: str = "en"
         logger.info(f"[Nav] STEP 3 esito click: {clicked} — URL: {driver.current_url}")
         if "/maps/place/" in driver.current_url and _has_review_signals():
             logger.info("[Nav] STEP 3 OK — scheda place da click lista")
-            return
+            return driver  # FIX: return driver esplicito
 
     if "/maps/place/" in driver.current_url:
         logger.info("[Nav] Su place page, attendo rendering tardivo")
         for _ in range(6):
             if _has_review_signals():
                 logger.info("[Nav] Review signals comparsi dopo attesa")
-                return
+                return driver  # FIX: return driver esplicito
             time.sleep(1)
 
     # ------------------------------------------------------------------
@@ -804,12 +787,12 @@ def _navigate_to_place(driver, mon, name: str, place_href: str, lang: str = "en"
     # ------------------------------------------------------------------
     logger.info("[Nav] STEP 4 — fallback su URL diretto")
     try:
-        driver = _safe_get(driver, mon, worker_label, place_href)
+        driver = _safe_get_local(driver, place_href)
         time.sleep(4)
         logger.info(f"[Nav] STEP 4 URL dopo fallback diretto: {driver.current_url}")
     except Exception as e:
         logger.error(f"[Nav] STEP 4 fallback diretto fallito: {e}")
-    return driver
+    return driver  # FIX: return driver esplicito (era gia' presente qui)
 
 
 # ---------------------------------------------------------------------------
@@ -825,16 +808,38 @@ def scrape_with_selenium(
     lang: str = "en",
     debug_screenshot: bool = False,
     max_places_per_driver: int = 25,
+    driver_factory: Optional[Callable] = None,
 ):
+    """Scrape Google Maps search results.
+
+    Parameters
+    ----------
+    driver_factory : callable, optional
+        Factory function per creare un nuovo driver Chrome.
+        Firma attesa: driver_factory(label: str = "") -> webdriver.Chrome
+        Se fornita, viene usata per TUTTE le ricreazioni del driver
+        (riciclo periodico, recovery da crash, _safe_get, _navigate_to_place).
+        Se None, usa init_driver() seriale (undetected_chromedriver).
+
+        Usare sempre driver_factory nei worker paralleli per evitare che
+        il riciclo del driver chiami undetected_chromedriver dentro un
+        subprocess di ProcessPoolExecutor, causando 'Connection refused'.
+    """
     cfg = _get_lang_cfg(lang)
     results = []
     seen_in_run: set = set()
-    mon = None  # will be set on first driver init
+    mon = None
     places_processed_with_current_driver = 0
 
     def _init_driver_with_label(label: str = ""):
-        """Helper to init driver and keep mon in closure."""
+        """Crea un nuovo driver usando driver_factory se disponibile,
+        altrimenti init_driver seriale."""
         nonlocal mon
+        if driver_factory is not None:
+            _driver = driver_factory(label)
+            mon = None
+            return _driver
+        # Fallback seriale (modalita' non-parallela)
         _driver, _mon = init_driver(
             headless=headless,
             lang=cfg["lang"],
@@ -871,7 +876,7 @@ def scrape_with_selenium(
                 try:
                     if driver is None:
                         driver = _init_driver_with_label(worker_label)
-                    driver = _safe_get(driver, mon, worker_label, url)
+                    driver = _safe_get(driver, mon, worker_label, url, _driver_factory=_init_driver_with_label)
                     nav_success = True
                     break
                 except Exception as e_nav:
@@ -1007,12 +1012,26 @@ def scrape_with_selenium(
 
                 logger.info(f"Navigazione scheda con bypass limited view: {name}")
                 try:
-                    driver = _navigate_to_place(driver, mon, name, place_href, lang=lang, worker_label=worker_label)
+                    driver = _navigate_to_place(
+                        driver, mon, name, place_href,
+                        lang=lang, worker_label=worker_label,
+                        _driver_factory=_init_driver_with_label,
+                    )
                 except Exception as e_nav:
                     logger.error(f"Errore navigazione scheda '{name}': {e_nav}")
                     continue
 
-                panel_ready = _wait_for_place_page(driver, expected_name=name, timeout=15, mon=mon, worker_label=worker_label)
+                # Sanity check: _navigate_to_place dovrebbe sempre ritornare driver
+                if driver is None:
+                    logger.error(f"[BUG] _navigate_to_place ha ritornato None per '{name}', reinizializzo")
+                    driver = _init_driver_with_label(worker_label)
+                    continue
+
+                panel_ready = _wait_for_place_page(
+                    driver, expected_name=name, timeout=15,
+                    mon=mon, worker_label=worker_label,
+                    _driver_factory=_init_driver_with_label,
+                )
                 if not panel_ready:
                     logger.warning(f"[Skip] Scheda non caricata per '{name}', salto.")
                     continue
@@ -1121,7 +1140,10 @@ def scrape_with_selenium(
                     except Exception:
                         continue
 
-                _wait_for_authority_link(driver, timeout=6, mon=mon, worker_label=worker_label)
+                _wait_for_authority_link(
+                    driver, timeout=6, mon=mon, worker_label=worker_label,
+                    _driver_factory=_init_driver_with_label,
+                )
 
                 website_selectors = [
                     "a[data-item-id='authority']",
@@ -1189,6 +1211,7 @@ def scrape_with_selenium(
                         logger.debug(f"[Tab Cleanup] Errore chiusura tab: {e}")
 
                 # Riciclo del driver ogni max_places_per_driver place
+                # Usa _init_driver_with_label che rispetta driver_factory se fornita
                 if max_places_per_driver > 0 and places_processed_with_current_driver >= max_places_per_driver:
                     logger.info(f"[Driver Recycle] Riciclo driver dopo {places_processed_with_current_driver} place")
                     try:

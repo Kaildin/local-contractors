@@ -78,12 +78,12 @@ def _init_worker_driver(
 ) -> Tuple[webdriver.Chrome, Any]:
     """
     Inizializza Chrome per i worker paralleli usando SOLO ChromeDriverManager.
-    
+
     Questo evita i problemi di undetected_chromedriver con:
     - Subprocess inheritance in ProcessPoolExecutor
     - Remote debugging ports che causano 'Connection refused'
     - Patch del binario che causa race conditions
-    
+
     Returns:
         Tuple (driver, None) - il monitor non e' disponibile in questa modalita'
     """
@@ -92,7 +92,6 @@ def _init_worker_driver(
         f"(headless={headless}, lang={lang}, label={worker_label})"
     )
 
-    # Trova il binario Chrome
     chromium_paths = [
         "/usr/bin/google-chrome",
         "/usr/bin/google-chrome-stable",
@@ -159,10 +158,10 @@ def _init_worker_driver(
         _apply_headless_flags_worker(chrome_options, _IS_LINUX)
     else:
         chrome_options.add_argument("--window-position=0,0")
-    
+
     for flag in _WORKER_FLAGS:
         chrome_options.add_argument(flag)
-    
+
     if chromium_binary:
         chrome_options.binary_location = chromium_binary
 
@@ -173,7 +172,7 @@ def _init_worker_driver(
             driver_version=str(chromium_version_int) if chromium_version_int else None,
         ).install()
     )
-    
+
     driver = webdriver.Chrome(service=service, options=chrome_options)
     logger.info("[WorkerDriver] Chrome avviato con ChromeDriverManager")
 
@@ -189,7 +188,7 @@ def _init_worker_driver(
     except Exception as e:
         logger.warning(f"[WorkerDriver] Patch navigator fallita: {e}")
 
-    return driver, None  # No monitor for now in worker mode
+    return driver, None  # No monitor in worker mode
 
 
 def worker_scrape_cities(
@@ -209,31 +208,18 @@ def worker_scrape_cities(
     """
     Process a list of city entries serially, each with its own fresh driver.
 
-    Ogni citta' ottiene un driver Chrome dedicato che viene sempre chiuso
-    nel blocco finally, anche in caso di eccezione o segnale di stop.
-    All'avvio il worker si mette in attesa per worker_id*2 secondi per
-    evitare che tutti i worker patchino undetected_chromedriver nello stesso
-    istante (il FileLock in driver_utils serializza ulteriormente il patching).
-
-    Parameters
-    ----------
-    city_entries : list of dicts with keys 'city', 'state', 'population'
-    keywords     : list of keyword strings
-    worker_id    : integer label used in log messages and startup stagger
-
-    Returns
-    -------
-    Flat list of lead dicts collected across all cities in this chunk.
+    Il worker passa driver_factory=_make_worker_driver a scrape_with_selenium
+    in modo che TUTTE le ricreazioni del driver (riciclo periodico, recovery
+    da crash, _safe_get, _navigate_to_place) usino _init_worker_driver invece
+    di init_driver seriale (che usa undetected_chromedriver e causa
+    'Connection refused' dentro ProcessPoolExecutor).
     """
     global _STOP_REQUESTED
     _STOP_REQUESTED = False
 
-    # Registra handler per SIGTERM (GUI Stop) e SIGINT (Ctrl+C)
     signal.signal(signal.SIGTERM, _handle_sigterm)
     signal.signal(signal.SIGINT, _handle_sigterm)
 
-    # Local imports so that Chrome is only initialised inside the spawned
-    # process, never in the parent that calls ProcessPoolExecutor.
     from src.scraper import get_max_results  # noqa: PLC0415
     from src.selenium_scraper import scrape_with_selenium
     from src.website_checker import get_website_status, website_is_real
@@ -248,17 +234,36 @@ def worker_scrape_cities(
         format=f"%(asctime)s [W{worker_id}][%(levelname)s] %(name)s: %(message)s",
     )
 
-    # Stagger startup: evita che tutti i worker inizino contemporaneamente
+    # Stagger startup
     stagger_secs = worker_id * 2
     if stagger_secs > 0:
         logger.info(f"[W{worker_id}] Startup stagger: attendo {stagger_secs}s...")
         time.sleep(stagger_secs)
 
+    # ---------------------------------------------------------------------------
+    # Factory per questo worker: usa SEMPRE _init_worker_driver (ChromeDriverManager
+    # puro, senza undetected_chromedriver). Viene passata a scrape_with_selenium
+    # come driver_factory cosi tutti i restart/recycle usano il driver corretto.
+    # ---------------------------------------------------------------------------
+    _captured_headless = headless
+    _captured_lang = lang
+    _captured_worker_id = worker_id
+
+    def _make_worker_driver(label: str = "") -> webdriver.Chrome:
+        """Factory che crea un nuovo driver worker-safe (senza ucd)."""
+        logger.info(f"[W{_captured_worker_id}] Creazione nuovo driver worker (label={label})")
+        driver, _ = _init_worker_driver(
+            headless=_captured_headless,
+            lang=_captured_lang,
+            worker_label=label or f"W{_captured_worker_id}",
+        )
+        return driver
+
     all_results: List[Dict[str, Any]] = []
     driver = None
 
     try:
-        # Initialize driver ONCE for this worker process
+        # Inizializza driver una volta per questo worker
         driver, _ = _init_worker_driver(
             headless=headless,
             lang=lang,
@@ -277,17 +282,18 @@ def worker_scrape_cities(
 
             logger.info(f"[W{worker_id}] Scraping '{city}' ({state}) – max_results={max_results}")
 
-            # Check stop flag before starting each city
             if _STOP_REQUESTED:
                 logger.warning(f"[W{worker_id}] Stop richiesto prima di {city} — interrompo")
                 break
 
             try:
-                # Build search URLs for this city
                 from src.scraper import build_search_urls
                 search_urls = build_search_urls([city], keywords, lang=lang, state=state)
 
-                # Use the worker's driver directly
+                # Passa driver_factory=_make_worker_driver: ogni volta che
+                # scrape_with_selenium deve ricreare il driver (riciclo, crash,
+                # _safe_get, _navigate_to_place) usa ChromeDriverManager puro
+                # invece di undetected_chromedriver.
                 results_raw, driver, _ = scrape_with_selenium(
                     search_urls,
                     driver=driver,
@@ -295,11 +301,11 @@ def worker_scrape_cities(
                     scroll_times=scroll_times,
                     headless=headless,
                     debug_screenshot=debug_screenshot,
+                    driver_factory=_make_worker_driver,
                 )
 
-                # Process results (filter, check website, etc.)
                 from src.scraper import CSV_FIELDNAMES, _load_already_scraped, _append_lead_to_csv
-                
+
                 already_seen: set = set()
                 if output_csv:
                     already_seen = _load_already_scraped(output_csv)
@@ -368,17 +374,15 @@ def worker_scrape_cities(
                 logger.error(
                     f"[W{worker_id}] Errore su '{city}': {traceback.format_exc()}"
                 )
-    
+
     finally:
-        # Close the driver for this worker
         if driver:
             try:
                 driver.quit()
                 logger.info(f"[W{worker_id}] Driver chiuso")
             except Exception as e:
                 logger.warning(f"[W{worker_id}] Errore chiusura driver: {e}")
-        
-        # Cleanup temp files
+
         try:
             import glob
             patterns = [
