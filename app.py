@@ -135,6 +135,7 @@ NICHES = [
     "Muratore / Ristrutturazioni",
     "Fabbro",
     "Carrozziere",
+    "Fotovoltaico / Impianti solari",
     "Plumber",
     "Dog Groomer",
     "Phone Repair",

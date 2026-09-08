@@ -3,7 +3,7 @@
 # mercato: "it" | "us" | "both"
 
 NICHES = [
-    # ── Mercato IT ───────────────────────────────────────────────
+    # Mercato IT
     ("Imbianchino / Pittore edile",  ["imbianchino", "pittore edile"]),
     ("Idraulico / Termoidraulico",    ["idraulico", "termoidraulico"]),
     ("Elettricista",                  ["elettricista", "impianti elettrici"]),
@@ -14,8 +14,9 @@ NICHES = [
     ("Muratore / Ristrutturazioni",   ["muratore", "ristrutturazioni edili"]),
     ("Fabbro",                        ["fabbro", "lavorazione ferro"]),
     ("Carrozziere",                   ["carrozziere", "carrozzeria"]),
+    ("Fotovoltaico / Impianti solari", ["fotovoltaico", "impianti solari", "pannelli solari"]),
 
-    # ── Mercato US ───────────────────────────────────────────────
+    # Mercato US
     ("Plumber",       ["plumber", "plumbing services"]),
     ("Dog Groomer",   ["dog groomer", "pet grooming"]),
     ("Phone Repair",  ["phone repair", "cell phone repair"]),
