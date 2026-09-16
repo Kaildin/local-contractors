@@ -31,6 +31,12 @@ def main():
                         help="Salva screenshot SERP per debug")
     parser.add_argument("--log-level", default="INFO",
                         choices=["DEBUG", "INFO", "WARNING", "ERROR"])
+    parser.add_argument("--no-email", action="store_true",
+                        help="Disabilita estrazione email")
+    parser.add_argument("--no-relevance", action="store_true",
+                        help="Disabilita analisi pertinenza")
+    parser.add_argument("--admin-search", action="store_true",
+                        help="Abilita ricerca amministratore")
     args = parser.parse_args()
 
     logging.basicConfig(
@@ -54,6 +60,9 @@ def main():
     print(f"Headless: {args.headless} | HTTP check: {not args.no_http_check} | Scroll: {args.scroll_times}")
     print(f"lang: {args.lang}")
     print(f"Max risultati per keyword: {args.max_results}")
+    print(f"Email extraction: {not args.no_email}")
+    print(f"Relevance analysis: {not args.no_relevance}")
+    print(f"Admin search: {args.admin_search}")
     print(f"Output CSV: {out_path}\n")
 
     results = search_contractors(
@@ -68,6 +77,10 @@ def main():
         max_results=args.max_results,
         output_csv=out_path,
         debug_screenshot=args.debug_screenshot,
+        industry=args.nicchie[0] if args.nicchie else None,
+        enable_email_extraction=not args.no_email,
+        enable_relevance_analysis=not args.no_relevance,
+        enable_admin_search=args.admin_search,
     )
 
     print(f"\n{'='*60}")
@@ -80,7 +93,11 @@ def main():
         print(f"    keyword:     {r.get('keyword', '')}")
         print(f"    telefono:    {r.get('telefono', '')}")
         print(f"    recensioni:  {r.get('num_recensioni', '')}")
-        print(f"    sito_google: {r.get('sito_google', '')}")
+        print(f"    sito_web:    {r.get('sito_web', '')}")
+        print(f"    email:       {r.get('email', '')}")
+        print(f"    pertinenza: {r.get('pertinenza', '')}")
+        print(f"    categoria:   {r.get('categoria', '')}")
+        print(f"    contatto:    {r.get('contatto', '')}")
         print(f"    maps:        {r.get('maps_url', '')}")
         print()
 
